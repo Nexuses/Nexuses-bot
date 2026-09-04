@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f6f3ee;
+  --foreground: #1c1916;
+  --ink: #f6f3ee;
+  --ink-2: #efeae2;
+  --panel: #ffffff;
+  --line: #e2dbd2;
+  --paper: #1c1916;
+  --muted: #6f675c;
+  --brass: #a56b35;
+  --brass-2: #8a582c;
+  --sea: #1e8a7a;
+  --sea-2: #176f62;
+  --on-sea: #ffffff;
+  --on-brass: #ffffff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-panel: var(--panel);
+  --color-line: var(--line);
+  --color-paper: var(--paper);
+  --color-muted: var(--muted);
+  --color-brass: var(--brass);
+  --color-brass-2: var(--brass-2);
+  --color-sea: var(--sea);
+  --color-sea-2: var(--sea-2);
+  --color-on-sea: var(--on-sea);
+  --color-on-brass: var(--on-brass);
+  --font-sans: var(--font-manrope);
+  --font-display: var(--font-syne);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+::selection {
+  background: var(--brass);
+  color: var(--on-brass);
+}
+
+.chat-md > :first-child {
+  margin-top: 0;
+}
+
+.chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-md li > p {
+  margin: 0;
+}

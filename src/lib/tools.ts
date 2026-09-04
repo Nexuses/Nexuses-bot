@@ -1,0 +1,1388 @@
+import type { ToolDef } from "@/lib/llm";
+import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
+import {
+  displayProviderName,
+  normalizeMcpUrl,
+  normalizeProvider,
+  parseAuthType,
+  removeIntegrationDoc,
+  upsertIntegrationDoc,
+  maskKey,
+} from "@/lib/integrations";
+import type { AuthType, Provider } from "@/types/chat";
+
+export type StoredIntegration = {
+  _id: string;
+  provider: Provider;
+  name: string;
+  apiKey: string;
+  baseUrl?: string;
+  mcpUrl?: string;
+  authType?: AuthType;
+};
+
+const ATTIO = "https://api.attio.com";
+const BREVO = "https://api.brevo.com";
+const LEMLIST = "https://api.lemlist.com";
+
+function clip(data: unknown, max = 8000) {
+  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  return text.length > max ? `${text.slice(0, max)}\n…truncated` : text;
+}
+
+async function requestJson(url: string, init: RequestInit) {
+  const res = await fetch(url, { ...init, cache: "no-store" });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 800)}`);
+  }
+  if (!text) return "";
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function attioHeaders(apiKey: string) {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function brevoHeaders(apiKey: string) {
+  return {
+    "api-key": apiKey,
+    accept: "application/json",
+    "Content-Type": "application/json",
+  };
+}
+
+function lemlistHeaders(apiKey: string) {
+  return {
+    Authorization: `Basic ${Buffer.from(`:${apiKey}`).toString("base64")}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function otherHeaders(integration: StoredIntegration): Record<string, string> {
+  const auth = integration.authType ?? "bearer";
+  if (auth === "api-key") {
+    return { "api-key": integration.apiKey, "Content-Type": "application/json" };
+  }
+  if (auth === "basic") {
+    return {
+      Authorization: `Basic ${Buffer.from(`:${integration.apiKey}`).toString("base64")}`,
+      "Content-Type": "application/json",
+    };
+  }
+  return {
+    Authorization: `Bearer ${integration.apiKey}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function findByProvider(integrations: StoredIntegration[], provider: Provider) {
+  const match = integrations.find((item) => item.provider === provider);
+  if (!match) throw new Error(`${provider} is not connected`);
+  return match;
+}
+
+function slugify(value: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  return slug || "list";
+}
+
+function asStringArray(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,;\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function encodeBody(raw: unknown) {
+  if (raw == null || raw === "") return undefined;
+  if (typeof raw === "string") return raw;
+  return JSON.stringify(raw);
+}
+
+function joinUrl(base: string, path: string, allowedHost: string) {
+  const trimmed = path.trim();
+  if (!trimmed) throw new Error("Path is required");
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    const url = new URL(trimmed);
+    if (url.hostname !== allowedHost && !url.hostname.endsWith(`.${allowedHost}`)) {
+      throw new Error(`URL must stay on ${allowedHost}`);
+    }
+    return url.toString();
+  }
+  return `${base}${trimmed.startsWith("/") ? trimmed : `/${trimmed}`}`;
+}
+
+async function providerRequest(
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body?: unknown,
+) {
+  const init: RequestInit = { method, headers };
+  if (body != null && method !== "GET" && method !== "HEAD") {
+    init.body = encodeBody(body);
+  }
+  const data = await requestJson(url, init);
+  return clip(data || { ok: true });
+}
+
+function asObjectArray(data: unknown) {
+  if (Array.isArray(data)) {
+    return data.filter((item): item is Record<string, unknown> => !!item && typeof item === "object");
+  }
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    for (const key of ["data", "campaigns", "leads", "activities"]) {
+      if (Array.isArray(record[key])) return asObjectArray(record[key]);
+    }
+  }
+  return [] as Record<string, unknown>[];
+}
+
+async function fetchLemlistCampaigns(apiKey: string) {
+  const campaigns: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < 1000; offset += 100) {
+    const page = asObjectArray(
+      await requestJson(`${LEMLIST}/api/campaigns?limit=100&offset=${offset}`, {
+        headers: lemlistHeaders(apiKey),
+      }),
+    );
+    campaigns.push(...page);
+    if (page.length < 100) break;
+  }
+  return campaigns;
+}
+
+async function resolveLemlistCampaign(apiKey: string, nameOrId: string) {
+  const query = nameOrId.trim();
+  if (!query) throw new Error("Campaign name is required");
+  const campaigns = await fetchLemlistCampaigns(apiKey);
+  const named = (item: Record<string, unknown>) => String(item.name || "").trim();
+  const idMatch = campaigns.find((item) => String(item._id || "") === query);
+  const exact = campaigns.filter((item) => named(item).toLowerCase() === query.toLowerCase());
+  const partial = campaigns.filter((item) => named(item).toLowerCase().includes(query.toLowerCase()));
+  const match = idMatch || (exact.length === 1 ? exact[0] : null) || (partial.length === 1 ? partial[0] : null);
+  if (!match) {
+    if (partial.length > 1) {
+      throw new Error(`Multiple campaigns match "${query}": ${partial.map(named).join(", ")}`);
+    }
+    const names = campaigns.map(named).filter(Boolean);
+    throw new Error(
+      `No Lemlist campaign named "${query}". Available campaigns: ${names.slice(0, 25).join(", ") || "none"}`,
+    );
+  }
+  return {
+    id: String(match._id || ""),
+    name: named(match) || query,
+    status: String(match.status || ""),
+  };
+}
+
+function lemlistEventTypes(raw: string) {
+  const value = raw.trim();
+  const lower = value.toLowerCase();
+  if (/click/.test(lower)) return { label: "clicks", types: ["emailsClicked"] };
+  if (/repl/.test(lower)) return { label: "replies", types: ["emailsReplied"] };
+  if (/bounce/.test(lower)) return { label: "bounced", types: ["emailsBounced"] };
+  if (/unsub/.test(lower)) return { label: "unsubscribed", types: ["emailsUnsubscribed"] };
+  if (/interested/.test(lower)) return { label: "interested", types: ["emailsInterested"] };
+  if (/^sent$|emails sent|send/.test(lower)) return { label: "sent", types: ["emailsSent"] };
+  if (/^emails[A-Z]/.test(value) || /^linkedin[A-Z]/.test(value)) {
+    return { label: value, types: [value] };
+  }
+  return { label: "opens", types: ["emailsOpened"] };
+}
+
+async function lemlistListCampaignsSummary(apiKey: string) {
+  const campaigns = await fetchLemlistCampaigns(apiKey);
+  return clip(
+    {
+      count: campaigns.length,
+      campaigns: campaigns.map((item) => ({
+        name: String(item.name || ""),
+        status: String(item.status || ""),
+      })),
+    },
+    12000,
+  );
+}
+
+async function lemlistPeopleByEvent(
+  apiKey: string,
+  args: Record<string, unknown>,
+  onStatus?: (text: string) => void,
+) {
+  const campaignQuery = String(args.campaign || args.campaignName || args.campaignId || "").trim();
+  if (!campaignQuery) throw new Error("Campaign name is required");
+  const { label, types } = lemlistEventTypes(String(args.event || args.type || "opens"));
+  onStatus?.(`Looking up "${campaignQuery}" in Lemlist…`);
+  const campaign = await resolveLemlistCampaign(apiKey, campaignQuery);
+  onStatus?.(`Collecting ${label} in ${campaign.name}. This can take a little time…`);
+
+  const people = new Map<string, { email: string; name: string; at: string }>();
+  let scanned = 0;
+  for (const type of types) {
+    for (let offset = 0; offset < 1000; offset += 100) {
+      const page = asObjectArray(
+        await requestJson(
+          `${LEMLIST}/api/activities?campaignId=${encodeURIComponent(campaign.id)}&type=${encodeURIComponent(type)}&version=v2&limit=100&offset=${offset}`,
+          { headers: lemlistHeaders(apiKey) },
+        ),
+      );
+      scanned += page.length;
+      for (const item of page) {
+        const email = String(item.email || item.leadEmail || "").trim().toLowerCase();
+        if (!email || !email.includes("@")) continue;
+        const name = [item.firstName, item.lastName].filter(Boolean).join(" ").trim() || String(item.fullName || "");
+        const at = String(item.createdAt || item.date || "");
+        const prev = people.get(email);
+        if (!prev || (at && (!prev.at || at < prev.at))) {
+          people.set(email, { email, name, at });
+        }
+      }
+      if (page.length && (offset + 100) % 200 === 0) {
+        onStatus?.(`Found ${people.size} unique emails so far…`);
+      }
+      if (page.length < 100) break;
+    }
+  }
+
+  const rows = [...people.values()].sort((a, b) => a.email.localeCompare(b.email));
+  return clip(
+    {
+      ok: true,
+      campaign: campaign.name,
+      status: campaign.status,
+      event: label,
+      uniquePeople: rows.length,
+      scanned,
+      people: rows.slice(0, 250).map((row) => ({
+        email: row.email,
+        name: row.name || null,
+      })),
+      truncated: rows.length > 250,
+    },
+    14000,
+  );
+}
+
+function pickAttioId(data: unknown, keys: string[]) {
+  const record = data as {
+    data?: { id?: Record<string, string>; api_slug?: string };
+  };
+  const id = record?.data?.id;
+  if (id) {
+    for (const key of keys) {
+      if (id[key]) return id[key];
+    }
+  }
+  return record?.data?.api_slug || "";
+}
+
+async function attioCreateListWithStages(
+  apiKey: string,
+  args: Record<string, unknown>,
+) {
+  const name = String(args.name || "").trim();
+  if (!name) throw new Error("List name is required");
+
+  const parentRaw = String(args.parent_object || args.parentObject || "people")
+    .trim()
+    .toLowerCase();
+  const parentMap: Record<string, string> = {
+    person: "people",
+    people: "people",
+    company: "companies",
+    companies: "companies",
+    deal: "deals",
+    deals: "deals",
+  };
+  const parentObject = parentMap[parentRaw] || parentRaw || "people";
+  const stages = asStringArray(args.stages ?? args.statuses ?? args.stage);
+  let apiSlug = slugify(String(args.api_slug || args.apiSlug || name));
+
+  async function createList(slug: string) {
+    return requestJson(`${ATTIO}/v2/lists`, {
+      method: "POST",
+      headers: attioHeaders(apiKey),
+      body: JSON.stringify({
+        data: {
+          name,
+          api_slug: slug,
+          parent_object: parentObject,
+          workspace_access: "full-access",
+          workspace_member_access: [],
+        },
+      }),
+    });
+  }
+
+  let list: unknown;
+  try {
+    list = await createList(apiSlug);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    if (!/slug|unique|already|conflict|400/i.test(message)) throw err;
+    apiSlug = `${apiSlug}_${Math.random().toString(36).slice(2, 7)}`;
+    list = await createList(apiSlug);
+  }
+
+  const listId = pickAttioId(list, ["list_id"]) || apiSlug;
+  const createdStages: string[] = [];
+  const errors: string[] = [];
+  let stageAttribute: string | null = null;
+
+  if (stages.length) {
+    const attributeBodies = [
+      {
+        title: "Stage",
+        description: "Pipeline stage",
+        api_slug: "stage",
+        type: "status",
+        is_required: false,
+        is_unique: false,
+        is_multiselect: false,
+        config: {},
+      },
+      {
+        title: "Stage",
+        description: "",
+        api_slug: "stage",
+        type: "status",
+        is_required: false,
+        is_unique: false,
+        is_multiselect: false,
+        config: {},
+      },
+    ];
+    for (const data of attributeBodies) {
+      try {
+        const attribute = await requestJson(
+          `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes`,
+          {
+            method: "POST",
+            headers: attioHeaders(apiKey),
+            body: JSON.stringify({ data }),
+          },
+        );
+        stageAttribute = pickAttioId(attribute, ["attribute_id"]) || "stage";
+        errors.length = 0;
+        break;
+      } catch (err) {
+        errors.push(`Stage attribute: ${err instanceof Error ? err.message : "failed"}`);
+        stageAttribute = "stage";
+      }
+    }
+
+    for (const stage of stages) {
+      try {
+        await requestJson(
+          `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageAttribute || "stage")}/statuses`,
+          {
+            method: "POST",
+            headers: attioHeaders(apiKey),
+            body: JSON.stringify({ data: { title: stage } }),
+          },
+        );
+        createdStages.push(stage);
+      } catch (err) {
+        errors.push(`${stage}: ${err instanceof Error ? err.message : "failed"}`);
+      }
+    }
+  }
+
+  return clip({
+    ok: errors.length === 0,
+    created: true,
+    list_name: name,
+    list_id: listId,
+    api_slug: apiSlug,
+    parent_object: parentObject,
+    stages: createdStages,
+    errors,
+    list,
+  });
+}
+
+function splitCsvLine(line: string) {
+  const cells: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === '"') {
+      if (quoted && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if ((char === "," || char === "\t") && !quoted) {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function parseCsv(text: string) {
+  const lines = text
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim());
+  if (lines.length < 2) return [];
+  const headers = splitCsvLine(lines[0]).map((header) => header.trim().toLowerCase());
+  return lines.slice(1).map((line) => {
+    const cols = splitCsvLine(line);
+    const row: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      if (header) row[header] = (cols[index] || "").trim().replace(/^"|"$/g, "");
+    });
+    return row;
+  });
+}
+
+function cell(row: Record<string, string>, keys: string[]) {
+  for (const key of keys) {
+    const match = Object.keys(row).find((header) => header === key || header.replace(/[_\s]+/g, "") === key.replace(/[_\s]+/g, ""));
+    if (match && row[match]) return row[match];
+  }
+  return "";
+}
+
+function parseName(row: Record<string, string>) {
+  const full = cell(row, ["name", "full name", "full_name", "contact"]);
+  let first = cell(row, ["first name", "first_name", "firstname", "first"]);
+  let last = cell(row, ["last name", "last_name", "lastname", "last", "surname"]);
+  if (!first && full) {
+    const parts = full.split(/\s+/);
+    first = parts[0] || "";
+    last = parts.slice(1).join(" ");
+  }
+  return { first, last, full: full || [first, last].filter(Boolean).join(" ") };
+}
+
+async function attioImportToList(
+  apiKey: string,
+  args: Record<string, unknown>,
+  files: { name: string; text: string }[] = [],
+  onStatus?: (text: string) => void,
+) {
+  const listName = String(args.list || args.list_name || args.listName || "").trim();
+  if (!listName) throw new Error("List name is required");
+  const stage = String(args.stage || args.status || "").trim();
+  const csvText =
+    String(args.csv || args.data || "").trim() ||
+    files.find((file) => /\.csv$/i.test(file.name) || file.text.includes(","))?.text ||
+    "";
+  if (!csvText) throw new Error("No CSV data found. Attach a CSV or pass csv text.");
+
+  const rows = parseCsv(csvText).slice(0, 150);
+  if (!rows.length) throw new Error("CSV has no data rows. Include a header row and at least one contact.");
+
+  onStatus?.(`Looking up "${listName}" in Attio…`);
+  const lists = (await requestJson(`${ATTIO}/v2/lists`, {
+    headers: attioHeaders(apiKey),
+  })) as { data?: { name?: string; api_slug?: string; id?: { list_id?: string } }[] };
+  const list = (lists.data || []).find(
+    (item) =>
+      item.name?.toLowerCase() === listName.toLowerCase() ||
+      item.api_slug?.toLowerCase() === slugify(listName),
+  );
+  if (!list) {
+    const names = (lists.data || []).map((item) => item.name).filter(Boolean);
+    throw new Error(
+      `No Attio list named "${listName}". Available lists: ${names.join(", ") || "none"}`,
+    );
+  }
+  const listId = list.id?.list_id || list.api_slug || "";
+
+  const attributes = (await requestJson(
+    `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes`,
+    { headers: attioHeaders(apiKey) },
+  )) as { data?: { api_slug?: string; title?: string; type?: string }[] };
+  const statusAttr =
+    (attributes.data || []).find((item) => item.type === "status" && /stage|status/i.test(item.api_slug || item.title || "")) ||
+    (attributes.data || []).find((item) => item.type === "status");
+  const stageSlug = statusAttr?.api_slug || "stage";
+
+  if (stage && statusAttr) {
+    try {
+      await requestJson(
+        `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
+        {
+          method: "POST",
+          headers: attioHeaders(apiKey),
+          body: JSON.stringify({ data: { title: stage } }),
+        },
+      );
+    } catch {
+      // Stage already exists.
+    }
+  }
+
+  const added: string[] = [];
+  const failed: string[] = [];
+  const stageNote = stage ? ` onto "${stage}"` : "";
+  onStatus?.(
+    `Found the list. Importing ${rows.length} contact${rows.length === 1 ? "" : "s"}${stageNote}. This can take a little time…`,
+  );
+
+  for (const [index, row] of rows.entries()) {
+    const n = index + 1;
+    if (n === 1 || n === rows.length || n % 5 === 0) {
+      onStatus?.(`Uploading contact ${n} of ${rows.length} to Attio…`);
+    }
+    const email = cell(row, ["email", "email address", "e-mail", "work email", "email_address"]);
+    const { first, last, full } = parseName(row);
+    const label = full || email || "row";
+    if (!email || !email.includes("@")) {
+      failed.push(`${label}: missing email`);
+      continue;
+    }
+    try {
+      const person = await requestJson(
+        `${ATTIO}/v2/objects/people/records?matching_attribute=email_addresses`,
+        {
+          method: "PUT",
+          headers: attioHeaders(apiKey),
+          body: JSON.stringify({
+            data: {
+              values: {
+                email_addresses: [{ email_address: email }],
+                name: [{ first_name: first || full, last_name: last, full_name: full || email }],
+              },
+            },
+          }),
+        },
+      );
+      const recordId = pickAttioId(person, ["record_id"]);
+      if (!recordId) throw new Error("Person was not created");
+      const payloads = [
+        {
+          parent_record_id: recordId,
+          parent_object: "people",
+          entry_values: stage ? { [stageSlug]: stage } : {},
+        },
+        {
+          parent_record_id: recordId,
+          parent_object: "people",
+          entry_values: stage ? { [stageSlug]: [{ status: stage }] } : {},
+        },
+        { parent_record_id: recordId, parent_object: "people", entry_values: {} },
+      ];
+      let listed = false;
+      let lastError = "";
+      for (const data of payloads) {
+        try {
+          await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
+            method: "PUT",
+            headers: attioHeaders(apiKey),
+            body: JSON.stringify({ data }),
+          });
+          listed = true;
+          break;
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : "failed";
+        }
+      }
+      if (!listed) {
+        await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
+          method: "POST",
+          headers: attioHeaders(apiKey),
+          body: JSON.stringify({ data: payloads[0] }),
+        });
+      }
+      added.push(full || email);
+    } catch (err) {
+      failed.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
+    }
+  }
+
+  return clip({
+    ok: failed.length === 0,
+    list: list.name,
+    stage: stage || null,
+    imported: added.length,
+    skipped: failed.length,
+    names: added.slice(0, 25),
+    errors: failed.slice(0, 15),
+  });
+}
+
+function httpToolParams(extra: Record<string, unknown> = {}) {
+  return {
+    type: "object",
+    properties: {
+      method: {
+        type: "string",
+        enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+        description: "HTTP method",
+      },
+      path: {
+        type: "string",
+        description: "API path like /v2/lists or a full https URL on this provider",
+      },
+      body: {
+        type: "string",
+        description: "JSON body as a string for POST/PUT/PATCH. Omit for GET.",
+      },
+      ...extra,
+    },
+    required: ["method", "path"],
+    additionalProperties: false,
+  };
+}
+
+export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
+  const tools: ToolDef[] = [
+    {
+      type: "function",
+      function: {
+          name: "connect_integration",
+          description:
+            "Connect Attio, Brevo, Lemlist, or a custom API using one API key the user pasted in chat. For Brevo, that single key is the API/MCP key — do not ask for a separate MCP URL. Call this when the user says connect / integrate / add Attio / Brevo / Lemlist, or pastes a key.",
+        parameters: {
+          type: "object",
+          properties: {
+            provider: {
+              type: "string",
+              enum: ["attio", "brevo", "lemlist", "other"],
+              description: "Which product to connect",
+            },
+            api_key: {
+              type: "string",
+              description: "The API key or token the user provided",
+            },
+            name: {
+              type: "string",
+              description: "Required for provider other: a short name for the custom API",
+            },
+            base_url: {
+              type: "string",
+              description: "Optional base URL for a custom API",
+            },
+            auth_type: {
+              type: "string",
+              enum: ["bearer", "api-key", "basic"],
+              description: "Auth style for custom APIs. Default bearer.",
+            },
+          },
+          required: ["provider", "api_key"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_integrations",
+        description: "List which APIs are already connected for this project. Does not reveal full API keys.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "disconnect_integration",
+        description: "Disconnect a saved integration by provider name (attio, brevo, lemlist) or custom API name.",
+        parameters: {
+          type: "object",
+          properties: {
+            provider: {
+              type: "string",
+              enum: ["attio", "brevo", "lemlist", "other"],
+              description: "Provider to disconnect",
+            },
+            name: {
+              type: "string",
+              description: "Custom API name, or Attio/Brevo/Lemlist",
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+  const has = (provider: Provider) => integrations.some((item) => item.provider === provider);
+
+  if (has("attio")) {
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "attio_create_list",
+          description:
+            "Create an Attio list/pipeline and optionally add kanban stages. Use this whenever the user asks to create a list, board, or pipeline in Attio. Example: name 'Nexuses bot', stages prospect, open, click, hot.",
+          parameters: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "List name, e.g. Nexuses bot" },
+              stages: {
+                type: "array",
+                items: { type: "string" },
+                description: "Pipeline stages in order, e.g. prospect, open, click, hot",
+              },
+              parent_object: {
+                type: "string",
+                description: "people, companies, or deals. Default people.",
+              },
+            },
+            required: ["name"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "attio_import_to_list",
+          description:
+            "Import people from an attached CSV (or csv text) into an existing Attio list, optionally onto a stage. Use this ONCE when the user uploads a CSV and asks to add/upload contacts to Attio. Do not call attio_api once per row.",
+          parameters: {
+            type: "object",
+            properties: {
+              list: { type: "string", description: "Attio list name, e.g. Nexuses bot" },
+              stage: { type: "string", description: "Pipeline stage, e.g. prospect" },
+              csv: {
+                type: "string",
+                description: "CSV text including header row. Omit if a CSV file is already attached.",
+              },
+            },
+            required: ["list"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "attio_list_lists",
+          description: "List all Attio lists in the workspace.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "attio_list_objects",
+          description: "List Attio CRM object types such as people and companies.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "attio_query_records",
+          description: "Search Attio records. Use object people or companies. Optional search text.",
+          parameters: {
+            type: "object",
+            properties: {
+              object: { type: "string", description: "Object slug, e.g. people or companies" },
+              search: { type: "string", description: "Optional name or email search" },
+              limit: { type: "number", description: "Max records, default 20" },
+            },
+            required: ["object"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "attio_api",
+          description:
+            "Call any Attio REST API v2 endpoint. Use for create/update/delete/search that other Attio tools do not cover. Paths start with /v2/. Attio write bodies are usually {\"data\":{...}}.",
+          parameters: httpToolParams(),
+        },
+      },
+    );
+  }
+
+  if (has("brevo")) {
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "brevo_list_contacts",
+          description: "List Brevo contacts.",
+          parameters: {
+            type: "object",
+            properties: {
+              limit: { type: "number" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "brevo_create_contact",
+          description: "Create or update a Brevo contact by email. Use this when the user asks to add a contact.",
+          parameters: {
+            type: "object",
+            properties: {
+              email: { type: "string" },
+              firstName: { type: "string" },
+              lastName: { type: "string" },
+            },
+            required: ["email"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "brevo_list_campaigns",
+          description: "List Brevo email campaigns.",
+          parameters: {
+            type: "object",
+            properties: { limit: { type: "number" } },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "brevo_api",
+          description:
+            "Call any Brevo API v3 endpoint. Use this to create lists, campaigns, send emails, or any other Brevo action. Paths start with /v3/.",
+          parameters: httpToolParams(),
+        },
+      },
+    );
+  }
+
+  if (has("lemlist")) {
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "lemlist_list_campaigns",
+          description:
+            "List Lemlist campaigns with name and status only. Completed campaigns have status ended. Use this when the user asks for campaigns, completed campaigns, running campaigns, or a status breakdown.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "lemlist_people_by_event",
+          description:
+            "List unique people (email and name) in a Lemlist campaign for an event. Use this ONCE when the user asks who opened, clicked, replied, bounced, or was sent mail. Pass the campaign name. Do not paginate with lemlist_api.",
+          parameters: {
+            type: "object",
+            properties: {
+              campaign: {
+                type: "string",
+                description: "Campaign name, e.g. Test Campaign",
+              },
+              event: {
+                type: "string",
+                description: "opens, clicks, replies, bounced, sent, or unsubscribed. Default opens.",
+              },
+            },
+            required: ["campaign"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "lemlist_list_leads",
+          description: "List leads in a Lemlist campaign. Pass the campaign name.",
+          parameters: {
+            type: "object",
+            properties: {
+              campaign: { type: "string", description: "Campaign name" },
+              campaignId: { type: "string", description: "Only if you already have the campaign id" },
+              limit: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "lemlist_list_activities",
+          description: "List recent Lemlist campaign activity. Prefer lemlist_people_by_event for who opened/clicked/replied.",
+          parameters: {
+            type: "object",
+            properties: {
+              campaign: { type: "string", description: "Campaign name" },
+              campaignId: { type: "string" },
+              type: { type: "string", description: "emailsOpened, emailsClicked, emailsReplied, etc." },
+              limit: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "lemlist_api",
+          description:
+            "Call any Lemlist API endpoint. Use only when the other Lemlist tools cannot do the job. Paths start with /api/.",
+          parameters: httpToolParams(),
+        },
+      },
+    );
+  }
+
+  const custom = integrations.filter((item) => item.provider === "other");
+  if (custom.length) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "custom_api_request",
+        description: `Call a connected custom API and complete the user's task. Available: ${custom.map((item) => item.name).join(", ")}. Use the integration name, HTTP method, and a path or full URL.`,
+        parameters: {
+          type: "object",
+          properties: {
+            integration: {
+              type: "string",
+              description: "Name of the connected custom API",
+            },
+            method: {
+              type: "string",
+              enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+            },
+            path: {
+              type: "string",
+              description: "Path like /v1/items or a full https URL",
+            },
+            body: {
+              type: "string",
+              description: "Optional JSON body as a string",
+            },
+          },
+          required: ["integration", "method", "path"],
+          additionalProperties: false,
+        },
+      },
+    });
+  }
+
+  return tools;
+}
+
+export type ToolContext = {
+  files?: { name: string; text: string }[];
+  onStatus?: (text: string) => void;
+  userId?: string;
+  projectId?: string;
+  secretsUsed?: string[];
+  onIntegrationsChange?: (integrations: StoredIntegration[]) => void;
+};
+
+export async function runTool(
+  name: string,
+  rawArgs: string | Record<string, unknown> | null | undefined,
+  integrations: StoredIntegration[],
+  context: ToolContext = {},
+) {
+  let args: Record<string, unknown> = {};
+  try {
+    if (rawArgs && typeof rawArgs === "object") args = rawArgs;
+    else if (rawArgs) args = JSON.parse(rawArgs);
+  } catch {
+    throw new Error("Invalid tool arguments");
+  }
+
+  const method = String(args.method || "GET").toUpperCase();
+
+  if (name === "list_integrations") {
+    return clip({
+      connected: integrations.map((item) => ({
+        name: item.name,
+        provider: item.provider,
+        keyHint: maskKey(item.apiKey),
+        baseUrl: item.baseUrl || null,
+        mcpUrl: item.mcpUrl || null,
+      })),
+      count: integrations.length,
+    });
+  }
+
+  if (name === "connect_integration") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot save integrations in this context");
+    }
+    const provider = normalizeProvider(String(args.provider || ""));
+    const apiKey = String(args.api_key || args.apiKey || "").trim();
+    if (!apiKey) throw new Error("API key is required");
+    const authType = parseAuthType(args.auth_type || args.authType);
+    const baseUrl = String(args.base_url || args.baseUrl || "").trim();
+    const mcpUrl =
+      provider === "brevo"
+        ? BREVO_MCP_DEFAULT
+        : normalizeMcpUrl(String(args.mcp_url || args.mcpUrl || ""));
+    const label = displayProviderName(provider, String(args.name || ""));
+    context.onStatus?.(`Connecting ${label} and checking the API key…`);
+    await validateIntegration({ provider, apiKey, baseUrl, authType });
+    const saved = await upsertIntegrationDoc({
+      userId: context.userId,
+      projectId: context.projectId,
+      provider,
+      name: label,
+      apiKey,
+      baseUrl,
+      mcpUrl,
+      authType,
+    });
+    context.secretsUsed?.push(apiKey);
+    const stored: StoredIntegration = {
+      _id: saved._id,
+      provider: saved.provider,
+      name: saved.name,
+      apiKey: saved.apiKey,
+      baseUrl: saved.baseUrl,
+      mcpUrl: saved.mcpUrl,
+      authType: saved.authType,
+    };
+    const next =
+      provider === "other"
+        ? [...integrations.filter((item) => !(item.provider === "other" && item.name === stored.name)), stored]
+        : [...integrations.filter((item) => item.provider !== provider), stored];
+    integrations.splice(0, integrations.length, ...next);
+    context.onIntegrationsChange?.(integrations);
+    return clip({
+      ok: true,
+      connected: saved.name,
+      provider: saved.provider,
+      keyHint: saved.keyHint,
+      mcpUrl: saved.mcpUrl || null,
+      note: `${saved.name} is connected. You can use its tools now in this chat.`,
+    });
+  }
+
+  if (name === "disconnect_integration") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot change integrations in this context");
+    }
+    const rawProvider = String(args.provider || "").trim();
+    const rawName = String(args.name || "").trim();
+    let provider: Provider | undefined;
+    let name = rawName;
+    if (rawProvider) {
+      provider = normalizeProvider(rawProvider);
+    } else if (rawName) {
+      const lower = rawName.toLowerCase();
+      if (lower === "attio" || lower === "brevo" || lower === "lemlist") {
+        provider = lower as Provider;
+        name = "";
+      }
+    }
+    context.onStatus?.(`Disconnecting ${name || provider || "integration"}…`);
+    const removed = await removeIntegrationDoc({
+      userId: context.userId,
+      projectId: context.projectId,
+      provider,
+      name: name || undefined,
+    });
+    const next = integrations.filter((item) => item._id !== removed._id);
+    integrations.splice(0, integrations.length, ...next);
+    context.onIntegrationsChange?.(integrations);
+    return clip({
+      ok: true,
+      disconnected: removed.name,
+      provider: removed.provider,
+    });
+  }
+
+  if (name === "attio_create_list") {
+    const attio = findByProvider(integrations, "attio");
+    return attioCreateListWithStages(attio.apiKey, args);
+  }
+
+  if (name === "attio_import_to_list") {
+    const attio = findByProvider(integrations, "attio");
+    return attioImportToList(attio.apiKey, args, context.files, context.onStatus);
+  }
+
+  if (name === "attio_list_lists") {
+    const attio = findByProvider(integrations, "attio");
+    const data = await requestJson(`${ATTIO}/v2/lists`, {
+      headers: attioHeaders(attio.apiKey),
+    });
+    return clip(data);
+  }
+
+  if (name === "attio_list_objects") {
+    const attio = findByProvider(integrations, "attio");
+    const data = await requestJson(`${ATTIO}/v2/objects`, {
+      headers: attioHeaders(attio.apiKey),
+    });
+    return clip(data);
+  }
+
+  if (name === "attio_query_records") {
+    const attio = findByProvider(integrations, "attio");
+    const object = String(args.object || "people");
+    const limit = Math.min(Number(args.limit) || 20, 50);
+    const search = String(args.search || "").trim();
+    const body: Record<string, unknown> = { limit };
+    if (search) {
+      body.filter = {
+        $or: [
+          { name: { $contains: search } },
+          { email_addresses: { email_address: { $contains: search } } },
+        ],
+      };
+    }
+    try {
+      const data = await requestJson(
+        `${ATTIO}/v2/objects/${encodeURIComponent(object)}/records/query`,
+        {
+          method: "POST",
+          headers: attioHeaders(attio.apiKey),
+          body: JSON.stringify(body),
+        },
+      );
+      return clip(data);
+    } catch {
+      const data = await requestJson(
+        `${ATTIO}/v2/objects/${encodeURIComponent(object)}/records/query`,
+        {
+          method: "POST",
+          headers: attioHeaders(attio.apiKey),
+          body: JSON.stringify({ limit }),
+        },
+      );
+      return clip(data);
+    }
+  }
+
+  if (name === "attio_api") {
+    const attio = findByProvider(integrations, "attio");
+    const url = joinUrl(ATTIO, String(args.path || ""), "api.attio.com");
+    return providerRequest(url, method, attioHeaders(attio.apiKey), args.body);
+  }
+
+  if (name === "brevo_list_contacts") {
+    const brevo = findByProvider(integrations, "brevo");
+    const limit = Math.min(Number(args.limit) || 20, 50);
+    const offset = Number(args.offset) || 0;
+    const data = await requestJson(
+      `${BREVO}/v3/contacts?limit=${limit}&offset=${offset}`,
+      { headers: brevoHeaders(brevo.apiKey) },
+    );
+    return clip(data);
+  }
+
+  if (name === "brevo_create_contact") {
+    const brevo = findByProvider(integrations, "brevo");
+    const data = await requestJson(`${BREVO}/v3/contacts`, {
+      method: "POST",
+      headers: brevoHeaders(brevo.apiKey),
+      body: JSON.stringify({
+        email: args.email,
+        attributes: {
+          FIRSTNAME: args.firstName || undefined,
+          LASTNAME: args.lastName || undefined,
+        },
+        updateEnabled: true,
+      }),
+    });
+    return clip(data || { ok: true });
+  }
+
+  if (name === "brevo_list_campaigns") {
+    const brevo = findByProvider(integrations, "brevo");
+    const limit = Math.min(Number(args.limit) || 20, 50);
+    const data = await requestJson(
+      `${BREVO}/v3/emailCampaigns?limit=${limit}`,
+      { headers: brevoHeaders(brevo.apiKey) },
+    );
+    return clip(data);
+  }
+
+  if (name === "brevo_api") {
+    const brevo = findByProvider(integrations, "brevo");
+    const url = joinUrl(BREVO, String(args.path || ""), "api.brevo.com");
+    return providerRequest(url, method, brevoHeaders(brevo.apiKey), args.body);
+  }
+
+  if (name === "lemlist_list_campaigns") {
+    const lemlist = findByProvider(integrations, "lemlist");
+    return lemlistListCampaignsSummary(lemlist.apiKey);
+  }
+
+  if (name === "lemlist_people_by_event") {
+    const lemlist = findByProvider(integrations, "lemlist");
+    return lemlistPeopleByEvent(lemlist.apiKey, args, context.onStatus);
+  }
+
+  if (name === "lemlist_list_leads") {
+    const lemlist = findByProvider(integrations, "lemlist");
+    const campaignQuery = String(args.campaign || args.campaignId || "").trim();
+    if (!campaignQuery) throw new Error("Campaign name is required");
+    const campaign = await resolveLemlistCampaign(lemlist.apiKey, campaignQuery);
+    const limit = Math.min(Number(args.limit) || 50, 100);
+    const data = await requestJson(
+      `${LEMLIST}/api/campaigns/${encodeURIComponent(campaign.id)}/leads/?limit=${limit}&offset=0`,
+      { headers: lemlistHeaders(lemlist.apiKey) },
+    );
+    const leads = asObjectArray(data).map((item) => {
+      const variables =
+        item.variables && typeof item.variables === "object"
+          ? (item.variables as Record<string, unknown>)
+          : {};
+      return {
+        email: item.email || variables.email,
+        firstName: item.firstName,
+        lastName: item.lastName,
+        status: item.status || item.state,
+      };
+    });
+    return clip({ campaign: campaign.name, count: leads.length, leads });
+  }
+
+  if (name === "lemlist_list_activities") {
+    const lemlist = findByProvider(integrations, "lemlist");
+    const campaignQuery = String(args.campaign || args.campaignId || "").trim();
+    if (!campaignQuery) throw new Error("Campaign name is required");
+    const campaign = await resolveLemlistCampaign(lemlist.apiKey, campaignQuery);
+    const limit = Math.min(Number(args.limit) || 50, 100);
+    const type = String(args.type || "").trim();
+    const params = new URLSearchParams({
+      campaignId: campaign.id,
+      version: "v2",
+      limit: String(limit),
+      offset: "0",
+    });
+    if (type) params.set("type", type);
+    const data = await requestJson(`${LEMLIST}/api/activities?${params}`, {
+      headers: lemlistHeaders(lemlist.apiKey),
+    });
+    return clip({ campaign: campaign.name, activities: asObjectArray(data) });
+  }
+
+  if (name === "lemlist_api") {
+    const lemlist = findByProvider(integrations, "lemlist");
+    const url = joinUrl(LEMLIST, String(args.path || ""), "api.lemlist.com");
+    return providerRequest(url, method, lemlistHeaders(lemlist.apiKey), args.body);
+  }
+
+  if (name === "custom_api_request") {
+    const label = String(args.integration || "").toLowerCase();
+    const integration = integrations.find(
+      (item) => item.provider === "other" && item.name.toLowerCase() === label,
+    );
+    if (!integration) {
+      throw new Error(`No custom API named "${args.integration}"`);
+    }
+    const path = String(args.path || "");
+    const url = path.startsWith("http")
+      ? path
+      : `${(integration.baseUrl || "").replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+    if (!url.startsWith("http")) {
+      throw new Error("Provide a full URL or set a base URL on this integration");
+    }
+    const init: RequestInit = { method, headers: otherHeaders(integration) };
+    if (args.body && method !== "GET") {
+      init.body = encodeBody(args.body);
+    }
+    const data = await requestJson(url, init);
+    return clip(data);
+  }
+
+  throw new Error(`Unknown tool ${name}`);
+}
+
+export async function validateIntegration(input: {
+  provider: Provider;
+  apiKey: string;
+  baseUrl?: string;
+  authType?: AuthType;
+}) {
+  if (input.provider === "attio") {
+    await requestJson(`${ATTIO}/v2/objects`, {
+      headers: attioHeaders(input.apiKey),
+    });
+    return;
+  }
+  if (input.provider === "brevo") {
+    try {
+      await requestJson(`${BREVO}/v3/account`, {
+        headers: brevoHeaders(input.apiKey),
+      });
+      return;
+    } catch {
+      // MCP keys use Bearer auth against Brevo's MCP endpoint, not the REST api-key header.
+      await requestJson(BREVO_MCP_DEFAULT, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${input.apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "nexuses", version: "1.0.0" },
+          },
+        }),
+      });
+      return;
+    }
+  }
+  if (input.provider === "lemlist") {
+    await requestJson(`${LEMLIST}/api/campaigns?limit=1&offset=0`, {
+      headers: lemlistHeaders(input.apiKey),
+    });
+    return;
+  }
+  if (input.baseUrl) {
+    const probe: StoredIntegration = {
+      _id: "probe",
+      provider: "other",
+      name: "probe",
+      apiKey: input.apiKey,
+      baseUrl: input.baseUrl,
+      authType: input.authType ?? "bearer",
+    };
+    try {
+      await requestJson(input.baseUrl.replace(/\/$/, ""), {
+        headers: otherHeaders(probe),
+      });
+    } catch {
+      // Custom APIs often reject a bare GET on the root. Key is still stored.
+    }
+  }
+}
