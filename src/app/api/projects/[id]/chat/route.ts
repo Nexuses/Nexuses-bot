@@ -14,6 +14,7 @@ import {
 } from "@/lib/html-shares";
 import { getOwnedChat, serializeChat, titleFromText } from "@/lib/chats";
 import { redactSecrets } from "@/lib/integrations";
+import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { complete, type ContentPart, type LlmMessage } from "@/lib/llm";
 import { requireProjectMember } from "@/lib/project-access";
 import { serializeIntegration } from "@/lib/serialize-integration";
@@ -90,8 +91,11 @@ function providerGuide(integrations: StoredIntegration[]) {
 - If the user asks to integrate / connect Notion: call start_oauth_connect with provider notion and put the button_markdown link in your reply (Connect Notion button → Notion authorize page).`);
   }
   if (integrations.some((item) => item.provider === "other")) {
+    const custom = integrations.filter((item) => item.provider === "other");
+    const known = knownCustomApiGuide(custom);
     parts.push(`Custom APIs are connected. Use custom_api_request to finish the user's task against those APIs.
-- SmartLead (name/base contains smartlead): the server adds ?api_key= automatically. Call paths like /campaigns or /campaigns/{id}/analytics. Base URL should be https://server.smartlead.ai/api/v1. Never put the API key in the path yourself.`);
+- SmartLead (name/base contains smartlead): the server adds ?api_key= automatically. Call paths like /campaigns or /campaigns/{id}/analytics. Base URL should be https://server.smartlead.ai/api/v1. Never put the API key in the path yourself.
+- MailBluster: base https://api.mailbluster.com; Authorization header is the raw API key (no Bearer). Developer API is Leads/Fields/Products/Orders only — NO campaign send/open/click/bounce reports. Do not invent campaign endpoints; tell the user to use Brevo, Lemlist, or SmartLead for campaign analytics.${known ? `\n${known}` : ""}`);
   }
   return parts.join("\n");
 }

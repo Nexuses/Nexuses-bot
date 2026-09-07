@@ -1,6 +1,7 @@
 import { Integration } from "@/models/Integration";
 import { serializeIntegration, maskKey } from "@/lib/serialize-integration";
 import type { AuthType, IntegrationDTO, Provider } from "@/types/chat";
+import { findKnownCustomApi } from "@/lib/known-custom-apis";
 
 export type StoredIntegrationInput = {
   userId: string;
@@ -34,7 +35,9 @@ export function displayProviderName(provider: Provider, name?: string) {
 }
 
 export function parseAuthType(raw: unknown): AuthType {
-  if (raw === "api-key" || raw === "basic" || raw === "query") return raw;
+  if (raw === "api-key" || raw === "basic" || raw === "query" || raw === "authorization") {
+    return raw;
+  }
   return "bearer";
 }
 
@@ -45,15 +48,36 @@ export function looksLikeQueryApiKeyAuth(input: {
   authType?: AuthType;
 }) {
   if (input.authType === "query") return true;
-  const hay = `${input.name || ""} ${input.baseUrl || ""}`.toLowerCase();
-  return /smartlead/.test(hay);
+  const known = findKnownCustomApi(`${input.name || ""} ${input.baseUrl || ""}`);
+  return known?.authType === "query";
+}
+
+/** MailBluster uses Authorization: <raw key> (no Bearer prefix). */
+export function looksLikeRawAuthorizationAuth(input: {
+  name?: string;
+  baseUrl?: string;
+  authType?: AuthType;
+}) {
+  if (input.authType === "authorization") return true;
+  const known = findKnownCustomApi(`${input.name || ""} ${input.baseUrl || ""}`);
+  return known?.authType === "authorization";
 }
 
 export function normalizeCustomBaseUrl(name: string, baseUrl: string) {
   const trimmed = baseUrl.trim().replace(/\/$/, "");
   if (trimmed) return trimmed;
-  if (/smartlead/i.test(name)) return "https://server.smartlead.ai/api/v1";
-  return "";
+  const known = findKnownCustomApi(name);
+  return known?.baseUrl || "";
+}
+
+export function resolveCustomAuthType(input: {
+  name: string;
+  baseUrl?: string;
+  authType?: AuthType;
+}): AuthType {
+  const known = findKnownCustomApi(`${input.name} ${input.baseUrl || ""}`);
+  if (known) return known.authType;
+  return input.authType || "bearer";
 }
 
 export function normalizeMcpUrl(raw: string) {

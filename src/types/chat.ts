@@ -1,5 +1,5 @@
 export type Provider = "attio" | "brevo" | "lemlist" | "notion" | "other";
-export type AuthType = "bearer" | "api-key" | "basic" | "query";
+export type AuthType = "bearer" | "api-key" | "basic" | "query" | "authorization";
 
 export type IntegrationDTO = {
   _id: string;

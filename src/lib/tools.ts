@@ -18,14 +18,17 @@ import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import {
   displayProviderName,
   looksLikeQueryApiKeyAuth,
+  looksLikeRawAuthorizationAuth,
   normalizeCustomBaseUrl,
   normalizeMcpUrl,
   normalizeProvider,
   parseAuthType,
   removeIntegrationDoc,
+  resolveCustomAuthType,
   upsertIntegrationDoc,
   maskKey,
 } from "@/lib/integrations";
+import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
 import { notionOauthConfigured, notionRequest } from "@/lib/oauth/notion";
 import { Integration } from "@/models/Integration";
@@ -93,6 +96,14 @@ function lemlistHeaders(apiKey: string) {
 function otherHeaders(integration: StoredIntegration): Record<string, string> {
   if (looksLikeQueryApiKeyAuth(integration)) {
     return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+  }
+  // MailBluster: Authorization: <raw key> (no Bearer prefix)
+  if (looksLikeRawAuthorizationAuth(integration)) {
+    return {
+      Authorization: integration.apiKey,
       Accept: "application/json",
       "Content-Type": "application/json",
     };
@@ -1274,10 +1285,12 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
           .map((item) => {
             const mode = looksLikeQueryApiKeyAuth(item)
               ? "auth=query api_key"
-              : `auth=${item.authType || "bearer"}`;
+              : looksLikeRawAuthorizationAuth(item)
+                ? "auth=Authorization raw key"
+                : `auth=${item.authType || "bearer"}`;
             return `${item.name} (${mode}${item.baseUrl ? `, base ${item.baseUrl}` : ""})`;
           })
-          .join("; ")}. For SmartLead use paths under /campaigns etc. — the server attaches ?api_key= automatically. Do not put the API key in the path.`,
+          .join("; ")}. For SmartLead use paths under /campaigns etc. — the server attaches ?api_key= automatically. For MailBluster use https://api.mailbluster.com paths like /api/leads — campaigns/opens/clicks are NOT available via their Developer API.`,
         parameters: {
           type: "object",
           properties: {
@@ -1476,9 +1489,14 @@ export async function runTool(
       provider === "other"
         ? normalizeCustomBaseUrl(label, String(args.base_url || args.baseUrl || ""))
         : String(args.base_url || args.baseUrl || "").trim();
-    if (provider === "other" && looksLikeQueryApiKeyAuth({ name: label, baseUrl, authType })) {
-      authType = "query";
-      if (!baseUrl) baseUrl = "https://server.smartlead.ai/api/v1";
+    if (provider === "other") {
+      authType = resolveCustomAuthType({ name: label, baseUrl, authType });
+      if (looksLikeQueryApiKeyAuth({ name: label, baseUrl, authType }) && !baseUrl) {
+        baseUrl = "https://server.smartlead.ai/api/v1";
+      }
+      if (looksLikeRawAuthorizationAuth({ name: label, baseUrl, authType }) && !baseUrl) {
+        baseUrl = "https://api.mailbluster.com";
+      }
     }
     context.onStatus?.(`Connecting ${label} and checking the API key…`);
     const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
@@ -1934,18 +1952,31 @@ export async function runTool(
       throw new Error(`No custom API named "${args.integration}"`);
     }
     const path = String(args.path || "");
+    const resolvedBase =
+      normalizeCustomBaseUrl(integration.name, integration.baseUrl || "") ||
+      integration.baseUrl ||
+      "";
     let url = path.startsWith("http")
       ? path
-      : `${(integration.baseUrl || "").replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+      : `${resolvedBase.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
     if (!url.startsWith("http")) {
-      throw new Error("Provide a full URL or set a base URL on this integration");
+      throw new Error(
+        "Provide a full URL or set a base URL on this integration (MailBluster: https://api.mailbluster.com)",
+      );
     }
     if (looksLikeQueryApiKeyAuth(integration)) {
       url = withQueryApiKey(url, integration.apiKey);
     }
     context.secretsUsed?.push(integration.apiKey);
     context.onStatus?.(`Calling ${integration.name}…`);
-    const init: RequestInit = { method, headers: otherHeaders(integration) };
+    const init: RequestInit = {
+      method,
+      headers: otherHeaders({
+        ...integration,
+        baseUrl: resolvedBase || integration.baseUrl,
+        authType: resolveCustomAuthType(integration),
+      }),
+    };
     if (args.body && method !== "GET") {
       init.body = encodeBody(args.body);
     }
