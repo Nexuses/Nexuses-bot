@@ -8,9 +8,29 @@ export const MAX_SHARE_HTML_CHARS = 400_000;
 
 /** Public site origin for share links. Set APP_URL in .env (no trailing slash). */
 export function getAppOrigin(fallback?: string) {
-  const fromEnv = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "").trim();
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-  if (fallback) return fallback.replace(/\/$/, "");
+  const normalize = (raw: string) => {
+    let value = raw.trim().replace(/\/$/, "");
+    if (!value) return "";
+    if (!/^https?:\/\//i.test(value)) {
+      const host = value.split("/")[0]?.toLowerCase() || "";
+      const loopback =
+        host === "localhost" ||
+        host.startsWith("localhost:") ||
+        host === "127.0.0.1" ||
+        host.startsWith("127.0.0.1:");
+      value = `${loopback ? "http" : "https"}://${value}`;
+    }
+    try {
+      return new URL(value).origin;
+    } catch {
+      return value.replace(/\/$/, "");
+    }
+  };
+
+  const fromEnv = normalize(process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "");
+  if (fromEnv) return fromEnv;
+  const fromFallback = normalize(fallback || "");
+  if (fromFallback) return fromFallback;
   return "http://localhost:3000";
 }
 

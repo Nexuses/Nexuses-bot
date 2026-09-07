@@ -24,10 +24,8 @@ export function notionClientSecret() {
 
 /** Public origin for OAuth. Prefer APP_URL (canonical per deploy); never use https://localhost. */
 export function notionPublicOrigin(requestOrigin?: string) {
-  const fromEnv = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "")
-    .trim()
-    .replace(/\/$/, "");
-  const fromRequest = (requestOrigin || "").trim().replace(/\/$/, "");
+  const rawEnv = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "").trim();
+  const rawRequest = (requestOrigin || "").trim();
 
   const hostOf = (origin: string) => {
     try {
@@ -40,25 +38,37 @@ export function notionPublicOrigin(requestOrigin?: string) {
     const host = hostOf(origin);
     return host === "localhost" || host === "127.0.0.1" || host === "::1";
   };
-  const normalize = (origin: string) => {
-    if (!origin) return "";
+
+  /** Ensure scheme exists — APP_URL=bot.example.com must become https://bot.example.com */
+  const normalize = (raw: string) => {
+    if (!raw) return "";
+    let value = raw.replace(/\/$/, "");
+    if (!/^https?:\/\//i.test(value)) {
+      const host = value.split("/")[0]?.toLowerCase() || "";
+      const loopback =
+        host === "localhost" ||
+        host.startsWith("localhost:") ||
+        host === "127.0.0.1" ||
+        host.startsWith("127.0.0.1:");
+      value = `${loopback ? "http" : "https"}://${value}`;
+    }
     try {
-      const url = new URL(origin);
-      // Notion redirect URIs for local are almost always http://localhost:3000
-      if (isLoopback(origin) && url.protocol === "https:") {
+      const url = new URL(value);
+      if (isLoopback(url.origin) && url.protocol === "https:") {
         url.protocol = "http:";
       }
-      return url.toString().replace(/\/$/, "");
+      return url.origin; // scheme + host + port only
     } catch {
-      return origin;
+      return "";
     }
   };
 
-  // Canonical deploy URL wins (prod must set APP_URL=https://bot.nexuses-online.com).
-  if (fromEnv) return normalize(fromEnv);
+  const fromEnv = normalize(rawEnv);
+  const fromRequest = normalize(rawRequest);
 
-  if (fromRequest && !isLoopback(fromRequest)) return normalize(fromRequest);
-  if (fromRequest) return normalize(fromRequest);
+  if (fromEnv) return fromEnv;
+  if (fromRequest && !isLoopback(fromRequest)) return fromRequest;
+  if (fromRequest) return fromRequest;
   return "http://localhost:3000";
 }
 
