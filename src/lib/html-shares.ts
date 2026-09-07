@@ -4,6 +4,14 @@ import { HtmlShare } from "@/models/HtmlShare";
 
 export const MAX_SHARE_HTML_CHARS = 400_000;
 
+/** Public site origin for share links. Set APP_URL in .env (no trailing slash). */
+export function getAppOrigin(fallback?: string) {
+  const fromEnv = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "").trim();
+  if (fromEnv) return fromEnv.replace(/\/$/, "");
+  if (fallback) return fallback.replace(/\/$/, "");
+  return "http://localhost:3000";
+}
+
 export function makePublicId() {
   return randomBytes(9).toString("base64url");
 }
@@ -25,7 +33,7 @@ export function publicSharePath(publicId: string) {
 }
 
 export function absoluteShareUrl(origin: string, publicId: string) {
-  return `${origin.replace(/\/$/, "")}${publicSharePath(publicId)}`;
+  return `${getAppOrigin(origin)}${publicSharePath(publicId)}`;
 }
 
 export async function createHtmlShare(input: {
@@ -33,7 +41,7 @@ export async function createHtmlShare(input: {
   projectId?: string;
   html: string;
   title?: string;
-  origin: string;
+  origin?: string;
 }) {
   await dbConnect();
   const html = normalizeSharedHtml(input.html);
@@ -51,7 +59,7 @@ export async function createHtmlShare(input: {
   return {
     publicId,
     title,
-    url: absoluteShareUrl(input.origin, publicId),
+    url: absoluteShareUrl(input.origin || "", publicId),
   };
 }
 

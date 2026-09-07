@@ -1171,7 +1171,7 @@ export async function runTool(
     if (!context.userId) throw new Error("Cannot create a share link in this context");
     const html = String(args.html || args.content || "").trim();
     const title = String(args.title || "").trim();
-    const origin = context.origin || "http://localhost:3000";
+    const origin = context.origin;
     context.onStatus?.("Creating a public link…");
     const share = await createHtmlShare({
       userId: context.userId,
