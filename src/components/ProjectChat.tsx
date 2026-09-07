@@ -148,7 +148,6 @@ export function ProjectChat({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [automations, setAutomations] = useState<AutomationDTO[]>([]);
   const [stoppingId, setStoppingId] = useState("");
-  const [oauthNotice, setOauthNotice] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -160,11 +159,6 @@ export function ProjectChat({
     if (!connected && !oauthError) return;
 
     if (connected) {
-      setOauthNotice(
-        connected === "notion"
-          ? "Notion connected. You can use it in chat now."
-          : `${connected} connected.`,
-      );
       void fetch(`/api/projects/${project._id}/integrations`)
         .then((res) => res.json())
         .then((data) => {
@@ -612,11 +606,6 @@ export function ProjectChat({
               />
               <p>{status || "Nexuses is working…"}</p>
             </div>
-          ) : null}
-          {oauthNotice ? (
-            <p className="rounded-xl border border-sea/30 bg-sea/10 px-3 py-2 text-sm text-sea">
-              {oauthNotice}
-            </p>
           ) : null}
           {error ? <p className="text-sm text-red-500">{error}</p> : null}
           </div>
