@@ -3,12 +3,15 @@ export const NEXUSES_LOGO_URL =
 
 const KIT_MARK = "data-nexuses-kit";
 const HEADER_MARK = "data-nexuses-report-header";
+const SHELL_MARK = "data-nexuses-shell";
 
 export type ShareEnhanceOptions = {
   titleHint?: string;
   clientLogoUrl?: string;
   clientName?: string;
 };
+
+const SIDE_PAD = "max(1.75rem, 6vw)";
 
 const KIT_HEAD = `
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -40,33 +43,94 @@ const KIT_HEAD = `
   };
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-<style>
+<style data-nexuses-kit-css>
   :root { color-scheme: light; }
-  html, body { margin: 0; min-height: 100%; background: #f6f3ee; color: #1c1916; font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif; }
-  body { background-image: radial-gradient(circle at top left, rgba(30,138,122,0.10), transparent 42%), linear-gradient(180deg, #f6f3ee 0%, #efeae2 100%); }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 100%;
+    background: #f6f3ee;
+    color: #1c1916;
+    font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+  body {
+    background-image:
+      radial-gradient(circle at top left, rgba(30,138,122,0.10), transparent 42%),
+      linear-gradient(180deg, #f6f3ee 0%, #efeae2 100%);
+  }
   h1, h2, h3, .font-display {
-    font-family: "Outfit", ui-sans-serif, system-ui, sans-serif;
+    font-family: "Outfit", ui-sans-serif, system-ui, sans-serif !important;
     letter-spacing: -0.02em;
     font-weight: 700;
   }
-  h1 { font-size: clamp(1.75rem, 3vw, 2.35rem); line-height: 1.15; max-width: 18ch; }
+  h1 { font-size: clamp(1.75rem, 3vw, 2.35rem); line-height: 1.15; max-width: 22ch; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 0.85rem 1rem; border-bottom: 1px solid #ddd6cb; vertical-align: top; }
   th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: #6b6560; font-weight: 600; }
   tbody tr:hover { background: rgba(30,138,122,0.04); }
-  .nx-shell { max-width: 1080px; margin: 0 auto; padding: 2rem max(1.5rem, 5vw) 4rem; box-sizing: border-box; }
-  .nx-card { background: rgba(255,255,255,0.72); border: 1px solid #ddd6cb; border-radius: 1.5rem; box-shadow: 0 18px 50px rgba(28,25,22,0.08); backdrop-filter: blur(8px); }
+
+  /* Page gutters — always applied, even when the model used px-0 / w-screen */
+  [${SHELL_MARK}], .nx-shell {
+    display: block !important;
+    width: 100% !important;
+    max-width: 1080px !important;
+    margin: 0 auto !important;
+    padding: 2rem ${SIDE_PAD} 4rem !important;
+    box-sizing: border-box !important;
+  }
+  [${SHELL_MARK}] .w-screen,
+  [${SHELL_MARK}] .max-w-none,
+  [${SHELL_MARK}] .max-w-full {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+  [${SHELL_MARK}] .px-0,
+  [${SHELL_MARK}] .pl-0,
+  [${SHELL_MARK}] .pr-0 {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+
+  .nx-card {
+    background: rgba(255,255,255,0.72);
+    border: 1px solid #ddd6cb;
+    border-radius: 1.5rem;
+    box-shadow: 0 18px 50px rgba(28,25,22,0.08);
+    backdrop-filter: blur(8px);
+  }
   .nx-stat { padding: 1.25rem 1.35rem; }
   .nx-stat .label { font-size: 0.75rem; color: #6b6560; text-transform: uppercase; letter-spacing: 0.06em; }
-  .nx-stat .value { margin-top: 0.35rem; font-family: "Outfit", sans-serif; font-size: 1.85rem; font-weight: 700; letter-spacing: -0.02em; }
-  .nx-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.75rem; padding-bottom: 1.25rem; border-bottom: 1px solid #ddd6cb; }
+  .nx-stat .value {
+    margin-top: 0.35rem;
+    font-family: "Outfit", sans-serif;
+    font-size: 1.85rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .nx-header {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 1rem;
+    width: 100%;
+    margin: 0 0 1.75rem;
+    padding: 0.15rem 0 1.25rem !important;
+    border-bottom: 1px solid #ddd6cb;
+  }
   .nx-header img { display: block; height: 40px; width: auto; max-width: 180px; object-fit: contain; }
   .nx-header .nx-client-logo { height: 44px; max-width: 160px; }
   .nx-header .nx-client-fallback {
     font-family: "Outfit", sans-serif;
-    font-size: 0.85rem; font-weight: 700; color: #1e8a7a;
-    letter-spacing: 0.04em; text-transform: uppercase;
-    border: 1px solid #ddd6cb; border-radius: 999px; padding: 0.55rem 0.9rem; background: rgba(255,255,255,0.7);
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #1e8a7a;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border: 1px solid #ddd6cb;
+    border-radius: 999px;
+    padding: 0.55rem 0.9rem;
+    background: rgba(255,255,255,0.7);
   }
 </style>
 `.trim();
@@ -150,12 +214,11 @@ export function buildReportHeader(options?: ShareEnhanceOptions) {
   const clientLogo = (options?.clientLogoUrl || "").trim();
   const clientName = (options?.clientName || "").trim() || "Client";
   const right = clientLogo
-    ? `<img class="nx-client-logo" src="${escapeAttr(clientLogo)}" alt="${escapeAttr(clientName)}" referrerpolicy="no-referrer" style="display:block;height:44px;width:auto;max-width:160px;object-fit:contain;margin-right:max(0.75rem,2vw);" />`
-    : `<span class="nx-client-fallback" style="font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;color:#1e8a7a;letter-spacing:0.04em;text-transform:uppercase;border:1px solid #ddd6cb;border-radius:999px;padding:0.55rem 0.9rem;background:rgba(255,255,255,0.7);margin-right:max(0.75rem,2vw);">${escapeHtml(clientName)}</span>`;
+    ? `<img class="nx-client-logo" src="${escapeAttr(clientLogo)}" alt="${escapeAttr(clientName)}" referrerpolicy="no-referrer" style="display:block;height:44px;width:auto;max-width:160px;object-fit:contain;" />`
+    : `<span class="nx-client-fallback">${escapeHtml(clientName)}</span>`;
 
-  // Inline flex styles so logos stay left/right with side margins.
-  return `<header class="nx-header" ${HEADER_MARK} style="display:flex;align-items:center;justify-content:space-between;gap:1rem;width:100%;margin:0 0 1.75rem;padding:0.25rem max(0.75rem,2vw) 1.25rem;border-bottom:1px solid #ddd6cb;box-sizing:border-box;">
-  <a href="https://nexuses.com" aria-label="Nexuses" style="display:inline-flex;align-items:center;flex:0 0 auto;margin-left:max(0.75rem,2vw);">
+  return `<header class="nx-header" ${HEADER_MARK} style="display:flex;align-items:center;justify-content:space-between;gap:1rem;width:100%;margin:0 0 1.75rem;padding:0.15rem 0 1.25rem;border-bottom:1px solid #ddd6cb;box-sizing:border-box;">
+  <a href="https://nexuses.com" aria-label="Nexuses" style="display:inline-flex;align-items:center;flex:0 0 auto;">
     <img src="${escapeAttr(NEXUSES_LOGO_URL)}" alt="Nexuses" referrerpolicy="no-referrer" style="display:block;height:40px;width:auto;max-width:180px;object-fit:contain;" />
   </a>
   <div style="display:inline-flex;align-items:center;justify-content:flex-end;flex:0 0 auto;margin-left:auto;">
@@ -173,14 +236,10 @@ function looksStyled(html: string) {
   );
 }
 
-/**
- * Keep only content from the first H1 onward.
- * Everything above the title is usually a duplicate logo bar from the model.
- */
+/** Keep only content from the first H1 onward (drops duplicate logo bars). */
 function contentFromTitle(body: string) {
   const h1Index = body.search(/<h1\b/i);
   if (h1Index >= 0) return body.slice(h1Index).trim();
-  // No h1 — still strip known brand chrome.
   return body
     .replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "gi"), "")
     .replace(/<p[^>]*class=["'][^"']*nx-brand[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "")
@@ -188,50 +247,42 @@ function contentFromTitle(body: string) {
     .trim();
 }
 
+/** Unwrap prior shells / full-bleed wrappers so we control gutters. */
+function unwrapBodyChrome(body: string) {
+  let next = body.trim();
+  // Remove previous injected shells.
+  next = next.replace(
+    new RegExp(`<main[^>]*${SHELL_MARK}[^>]*>([\\s\\S]*?)<\\/main>`, "i"),
+    "$1",
+  );
+  next = next.replace(/<main[^>]*class=["'][^"']*nx-shell[^"']*["'][^>]*>([\s\S]*?)<\/main>/i, "$1");
+  // Drop old injected headers — we re-add one.
+  next = next.replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "gi"), "");
+  return next.trim();
+}
+
+function wrapInShell(inner: string) {
+  return `<main class="nx-shell" ${SHELL_MARK} style="display:block;width:100%;max-width:1080px;margin:0 auto;padding:2rem ${SIDE_PAD} 4rem;box-sizing:border-box;">
+${inner}
+</main>`;
+}
+
 function replaceOrInjectHeader(body: string, options?: ShareEnhanceOptions) {
-  return `${buildReportHeader(options)}\n${contentFromTitle(body)}`;
+  const cleaned = contentFromTitle(unwrapBodyChrome(body));
+  return wrapInShell(`${buildReportHeader(options)}\n${cleaned}`);
 }
 
 function ensureKitInHead(doc: string) {
-  const cssBlock = `<style data-nexuses-kit-css>
-  body { box-sizing: border-box; }
-  .nx-shell, main, .max-w-5xl, .max-w-6xl, .max-w-7xl {
-    max-width: 1080px !important;
-    margin-left: auto !important;
-    margin-right: auto !important;
-    padding-left: max(1.5rem, 5vw) !important;
-    padding-right: max(1.5rem, 5vw) !important;
-    box-sizing: border-box !important;
-  }
-  .nx-header {
-    display:flex !important;
-    align-items:center !important;
-    justify-content:space-between !important;
-    gap:1rem;
-    width:100%;
-    margin:0 0 1.75rem;
-    padding:0.25rem max(0.75rem, 2vw) 1.25rem !important;
-    border-bottom:1px solid #ddd6cb;
-    box-sizing:border-box;
-  }
-  .nx-header > a:first-child { margin-left: max(0.75rem, 2vw) !important; }
-  .nx-header .nx-client-logo,
-  .nx-header .nx-client-fallback { margin-right: max(0.75rem, 2vw) !important; }
-  .nx-header img { display:block; height:40px; width:auto; max-width:180px; object-fit:contain; }
-  .nx-header .nx-client-logo { height:44px; max-width:160px; }
-  h1, h2, h3, .font-display { font-family: "Outfit", ui-sans-serif, system-ui, sans-serif !important; letter-spacing: -0.02em; font-weight: 700; }
-</style>`;
-  // Always refresh kit CSS so older shares pick up margin + header fixes.
   let next = doc.replace(/<style[^>]*data-nexuses-kit-css[^>]*>[\s\S]*?<\/style>/gi, "");
   if (/<\/head>/i.test(next)) {
-    return next.replace(/<\/head>/i, `${cssBlock}\n</head>`);
+    return next.replace(/<\/head>/i, `${KIT_HEAD}\n</head>`);
   }
   return next;
 }
 
 /**
  * Ensure shared HTML dashboards get Tailwind + Nexuses fonts/colors + Chart.js.
- * Header: Nexuses logo left, client/project logo right.
+ * Always wraps content in a padded shell so left/right margins are never 0.
  */
 export function enhanceSharedHtml(raw: string, options?: ShareEnhanceOptions | string) {
   const opts: ShareEnhanceOptions =
@@ -242,14 +293,18 @@ export function enhanceSharedHtml(raw: string, options?: ShareEnhanceOptions | s
 
   html = markdownTablesToHtml(html);
   const title = opts.titleHint || extractTitle(html);
+  const shellBody = replaceOrInjectHeader(
+    looksStyled(html) && /<body[\s>]/i.test(html) ? stripDocumentChrome(html) : stripDocumentChrome(html),
+    opts,
+  );
 
+  // Always rebuild a consistent document so gutters cannot be overridden by the model.
   if (looksStyled(html) && /<html[\s>]/i.test(html)) {
     let doc = html.includes(KIT_MARK) ? html : html.replace(/<html/i, `<html ${KIT_MARK}`);
     doc = doc
       .replace(/family=Syne[^"&]*/gi, "family=Outfit:wght@500;600;700")
       .replace(/["']Syne["']/g, '"Outfit"')
       .replace(/font-family:\s*Syne/gi, 'font-family: "Outfit"');
-    // Ensure Outfit is available.
     if (!/Outfit/i.test(doc)) {
       doc = doc.replace(
         /<\/head>/i,
@@ -257,15 +312,14 @@ export function enhanceSharedHtml(raw: string, options?: ShareEnhanceOptions | s
       );
     }
     doc = ensureKitInHead(doc);
-    const bodyMatch = doc.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-    if (bodyMatch) {
-      const newBody = replaceOrInjectHeader(bodyMatch[1], opts);
-      doc = doc.replace(bodyMatch[0], `<body>${newBody}</body>`);
+    if (/<body[^>]*>[\s\S]*<\/body>/i.test(doc)) {
+      doc = doc.replace(/<body[^>]*>[\s\S]*<\/body>/i, `<body style="margin:0;padding:0;">${shellBody}</body>`);
+    } else {
+      doc += `<body style="margin:0;padding:0;">${shellBody}</body>`;
     }
     return doc;
   }
 
-  const body = replaceOrInjectHeader(stripDocumentChrome(html), opts);
   return `<!DOCTYPE html>
 <html lang="en" ${KIT_MARK}>
 <head>
@@ -274,10 +328,8 @@ export function enhanceSharedHtml(raw: string, options?: ShareEnhanceOptions | s
 <title>${escapeHtml(title)}</title>
 ${KIT_HEAD}
 </head>
-<body>
-<main class="nx-shell">
-  ${body}
-</main>
+<body style="margin:0;padding:0;">
+${shellBody}
 </body>
 </html>`;
 }
@@ -290,6 +342,6 @@ export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / 
 - Header (required): left = Nexuses logo, right = client/project logo ONCE in that header only. Do NOT repeat the client logo or client name above the title.
 - Do NOT put a text-only "NEXUSES" eyebrow as the main brand — use the logo image.
 - Title under the header should use Outfit, bold, normal tracking (not ultra-condensed / ultra-wide).
-- Layout: one header row (logos) → title + short subtitle → KPI cards → chart/table. Keep comfortable left/right page margins (about 5vw / 24px+).
+- Layout: wrap ALL page content in a centered container with left/right padding of at least 24px / 6vw (never px-0 or full-bleed edge-to-edge content). Structure: header → title + subtitle → KPI cards → chart/table.
 - Make rows scannable; use rounded-3xl cards, soft shadow, generous padding. Mobile-friendly.
 - Prefer semantic HTML + Tailwind utility classes. No React. Inline a small <script> only for Chart.js.`;
