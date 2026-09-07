@@ -6,7 +6,10 @@ import {
 } from "@/lib/automations";
 import {
   callBrevoMcpTool,
+  filterBrevoMcpTools,
+  listBrevoCampaignsViaMcp,
   listBrevoMcpTools,
+  resolveBrevoMcpToolName,
   validateBrevoMcp,
 } from "@/lib/brevo-mcp";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
@@ -918,6 +921,29 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
 
   if (has("brevo")) {
     const brevo = integrations.find((item) => item.provider === "brevo");
+    // Always expose campaign listing — works for MCP and REST keys.
+    tools.push({
+      type: "function",
+      function: {
+        name: "brevo_list_campaigns",
+        description:
+          "List Brevo email campaigns. Use this for completed/sent/draft campaigns. Pass status=sent for completed campaigns. Prefer this over guessing MCP tool names.",
+        parameters: {
+          type: "object",
+          properties: {
+            status: {
+              type: "string",
+              description:
+                "Filter: sent (completed), draft, queued, suspended, archive, in_process, or omit for all",
+            },
+            limit: { type: "number", description: "Max campaigns, default 50" },
+            offset: { type: "number" },
+          },
+          additionalProperties: false,
+        },
+      },
+    });
+
     if (brevo?.mcpUrl) {
       tools.push(
         {
@@ -925,8 +951,18 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
           function: {
             name: "brevo_mcp_list_tools",
             description:
-              "List all Brevo MCP tools available for this account (contacts, campaigns, analytics, CRM, etc.). Call this first when exploring Brevo data through MCP.",
-            parameters: { type: "object", properties: {}, additionalProperties: false },
+              "Search Brevo MCP tools by keyword. ALWAYS pass query (e.g. campaign, contact, list). Do not request the full unfiltered catalog — it is huge and gets truncated.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "Filter text, e.g. campaign, contact, analytics",
+                },
+              },
+              required: ["query"],
+              additionalProperties: false,
+            },
           },
         },
         {
@@ -934,7 +970,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
           function: {
             name: "brevo_mcp_call",
             description:
-              "Call a Brevo MCP tool by name with JSON arguments. Prefer this for reading campaigns, contacts, analytics, lists, and CRM data when Brevo is connected via MCP.",
+              "Call a Brevo MCP tool by name with JSON arguments. For listing campaigns use brevo_list_campaigns instead. Pass exact tool name from brevo_mcp_list_tools.",
             parameters: {
               type: "object",
               properties: {
@@ -983,18 +1019,6 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
                 lastName: { type: "string" },
               },
               required: ["email"],
-              additionalProperties: false,
-            },
-          },
-        },
-        {
-          type: "function",
-          function: {
-            name: "brevo_list_campaigns",
-            description: "List Brevo email campaigns.",
-            parameters: {
-              type: "object",
-              properties: { limit: { type: "number" } },
               additionalProperties: false,
             },
           },
@@ -1402,15 +1426,29 @@ export async function runTool(
 
   if (name === "brevo_mcp_list_tools") {
     const brevo = findByProvider(integrations, "brevo");
-    const tools = await listBrevoMcpTools(brevo.apiKey, brevo.mcpUrl || BREVO_MCP_DEFAULT);
+    const query = String(args.query || args.q || args.search || "").trim();
+    if (!query) {
+      return clip({
+        ok: false,
+        note: 'Pass query, e.g. query="campaign". The full Brevo tool catalog is too large to return unfiltered.',
+      });
+    }
+    const all = await listBrevoMcpTools(brevo.apiKey, brevo.mcpUrl || BREVO_MCP_DEFAULT);
+    const tools = filterBrevoMcpTools(all, query);
     return clip({
       mode: "mcp",
-      count: tools.length,
-      tools: tools.map((tool) => ({
+      query,
+      totalAvailable: all.length,
+      matched: tools.length,
+      tools: tools.slice(0, 60).map((tool) => ({
         name: tool.name,
-        description: tool.description,
+        description: (tool.description || "").slice(0, 160),
       })),
-    }, 14000);
+      note:
+        tools.length > 60
+          ? "Showing first 60 matches. Narrow the query if needed."
+          : "Use exact tool names with brevo_mcp_call. For campaigns prefer brevo_list_campaigns.",
+    });
   }
 
   if (name === "brevo_mcp_call") {
@@ -1421,12 +1459,47 @@ export async function runTool(
       args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
         ? (args.arguments as Record<string, unknown>)
         : {};
-    return callBrevoMcpTool(
-      brevo.apiKey,
-      toolName,
-      toolArgs,
-      brevo.mcpUrl || BREVO_MCP_DEFAULT,
-    );
+
+    const all = await listBrevoMcpTools(brevo.apiKey, brevo.mcpUrl || BREVO_MCP_DEFAULT);
+    const resolved = resolveBrevoMcpToolName(all, toolName);
+    const finalName = resolved.exact || toolName;
+    if (!resolved.exact) {
+      const suggestions =
+        resolved.suggestions.length > 0
+          ? resolved.suggestions
+          : filterBrevoMcpTools(all, toolName.split(/[_\s]+/)[0] || toolName)
+              .map((t) => t.name)
+              .slice(0, 12);
+      if (!suggestions.includes(finalName)) {
+        return clip({
+          ok: false,
+          error: `Unknown tool "${toolName}"`,
+          suggestions,
+          note: "Use one of the suggestions with brevo_mcp_call, or use brevo_list_campaigns for campaign lists.",
+        });
+      }
+    }
+
+    try {
+      return await callBrevoMcpTool(
+        brevo.apiKey,
+        finalName,
+        toolArgs,
+        brevo.mcpUrl || BREVO_MCP_DEFAULT,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "MCP call failed";
+      if (/unknown tool|not found|invalid tool/i.test(message)) {
+        const suggestions = resolveBrevoMcpToolName(all, toolName).suggestions;
+        return clip({
+          ok: false,
+          error: message,
+          suggestions,
+          note: "For campaigns use brevo_list_campaigns instead of guessing MCP names.",
+        });
+      }
+      throw err;
+    }
   }
 
   if (name === "brevo_list_contacts") {
@@ -1459,12 +1532,40 @@ export async function runTool(
 
   if (name === "brevo_list_campaigns") {
     const brevo = findByProvider(integrations, "brevo");
-    const limit = Math.min(Number(args.limit) || 20, 50);
-    const data = await requestJson(
-      `${BREVO}/v3/emailCampaigns?limit=${limit}`,
-      { headers: brevoHeaders(brevo.apiKey) },
+    const limit = Math.min(Number(args.limit) || 50, 100);
+    const offset = Number(args.offset) || 0;
+    const status = String(args.status || "").trim();
+    context.onStatus?.(
+      status
+        ? `Loading Brevo campaigns (${status})…`
+        : "Loading Brevo campaigns…",
     );
-    return clip(data);
+
+    // REST works for classic API keys; MCP keys need the campaign MCP path.
+    if (!brevo.mcpUrl) {
+      const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (status) qs.set("status", status);
+      const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
+        headers: brevoHeaders(brevo.apiKey),
+      });
+      return clip(data);
+    }
+
+    try {
+      const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (status) qs.set("status", status);
+      const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
+        headers: brevoHeaders(brevo.apiKey),
+      });
+      return clip({ mode: "rest", ...((data as object) || {}) });
+    } catch {
+      const viaMcp = await listBrevoCampaignsViaMcp(brevo.apiKey, {
+        status: status || undefined,
+        limit,
+        offset,
+      });
+      return clip(viaMcp);
+    }
   }
 
   if (name === "brevo_api") {

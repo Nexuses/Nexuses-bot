@@ -41,7 +41,7 @@ export function statusForTool(name: string) {
     attio_list_objects: "Checking Attio objects…",
     attio_query_records: "Searching Attio…",
     attio_api: "Updating Attio…",
-    brevo_mcp_list_tools: "Listing Brevo MCP tools…",
+    brevo_mcp_list_tools: "Searching Brevo MCP tools…",
     brevo_mcp_call: "Fetching data from Brevo MCP…",
     brevo_create_contact: "Adding a contact in Brevo…",
     brevo_list_contacts: "Loading Brevo contacts…",
