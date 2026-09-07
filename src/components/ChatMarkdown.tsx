@@ -175,7 +175,7 @@ function HtmlPreviewModal({
         <iframe
           title="HTML preview"
           sandbox="allow-scripts allow-forms allow-popups"
-          srcDoc={html}
+          srcDoc={enhanceSharedHtml(html)}
           className="h-full w-full flex-1 bg-white"
         />
       </div>
