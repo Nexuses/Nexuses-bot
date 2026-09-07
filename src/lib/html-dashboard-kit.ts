@@ -150,12 +150,12 @@ export function buildReportHeader(options?: ShareEnhanceOptions) {
   const clientLogo = (options?.clientLogoUrl || "").trim();
   const clientName = (options?.clientName || "").trim() || "Client";
   const right = clientLogo
-    ? `<img class="nx-client-logo" src="${escapeAttr(clientLogo)}" alt="${escapeAttr(clientName)}" referrerpolicy="no-referrer" style="display:block;height:44px;width:auto;max-width:160px;object-fit:contain;" />`
-    : `<span class="nx-client-fallback" style="font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;color:#1e8a7a;letter-spacing:0.04em;text-transform:uppercase;border:1px solid #ddd6cb;border-radius:999px;padding:0.55rem 0.9rem;background:rgba(255,255,255,0.7);">${escapeHtml(clientName)}</span>`;
+    ? `<img class="nx-client-logo" src="${escapeAttr(clientLogo)}" alt="${escapeAttr(clientName)}" referrerpolicy="no-referrer" style="display:block;height:44px;width:auto;max-width:160px;object-fit:contain;margin-right:max(0.75rem,2vw);" />`
+    : `<span class="nx-client-fallback" style="font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;color:#1e8a7a;letter-spacing:0.04em;text-transform:uppercase;border:1px solid #ddd6cb;border-radius:999px;padding:0.55rem 0.9rem;background:rgba(255,255,255,0.7);margin-right:max(0.75rem,2vw);">${escapeHtml(clientName)}</span>`;
 
-  // Inline flex styles so logos stay left/right even when kit CSS is missing from the page.
-  return `<header class="nx-header" ${HEADER_MARK} style="display:flex;align-items:center;justify-content:space-between;gap:1rem;width:100%;margin:0 0 1.75rem;padding:0 0 1.25rem;border-bottom:1px solid #ddd6cb;box-sizing:border-box;">
-  <a href="https://nexuses.com" aria-label="Nexuses" style="display:inline-flex;align-items:center;flex:0 0 auto;">
+  // Inline flex styles so logos stay left/right with side margins.
+  return `<header class="nx-header" ${HEADER_MARK} style="display:flex;align-items:center;justify-content:space-between;gap:1rem;width:100%;margin:0 0 1.75rem;padding:0.25rem max(0.75rem,2vw) 1.25rem;border-bottom:1px solid #ddd6cb;box-sizing:border-box;">
+  <a href="https://nexuses.com" aria-label="Nexuses" style="display:inline-flex;align-items:center;flex:0 0 auto;margin-left:max(0.75rem,2vw);">
     <img src="${escapeAttr(NEXUSES_LOGO_URL)}" alt="Nexuses" referrerpolicy="no-referrer" style="display:block;height:40px;width:auto;max-width:180px;object-fit:contain;" />
   </a>
   <div style="display:inline-flex;align-items:center;justify-content:flex-end;flex:0 0 auto;margin-left:auto;">
@@ -173,80 +173,23 @@ function looksStyled(html: string) {
   );
 }
 
-function stripDuplicateBrandChrome(body: string, options?: ShareEnhanceOptions) {
-  let next = body;
-  // Our previous injected header.
-  next = next.replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "i"), "");
-  // Text-only Nexuses brand label / eyebrow.
-  next = next.replace(/<p[^>]*class=["'][^"']*nx-brand[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "");
-  next = next.replace(
-    /<(p|div|span)[^>]*>\s*(?:<[^>]+>\s*)*NEXUSES\s*(?:<\/[^>]+>\s*)*<\/\1>/gi,
-    "",
-  );
-
-  // Anything before the first H1 that looks like a logo bar (flex/justify-between with images).
-  const h1Index = next.search(/<h1\b/i);
-  if (h1Index > 0) {
-    let before = next.slice(0, h1Index);
-    const after = next.slice(h1Index);
-
-    // Drop bot-made header/nav/logo rows.
-    before = before.replace(
-      /<(header|nav|div|section)[^>]*>[\s\S]*?<\/\1>/gi,
-      (block) => {
-        const imgs = (block.match(/<img\b/gi) || []).length;
-        const looksLogoRow =
-          imgs >= 1 &&
-          (/logo|brand|header|flex|justify-between|items-center/i.test(block) ||
-            /Nexuses-full-logo|nexuses\.com|cdn-nexlink/i.test(block) ||
-            (options?.clientLogoUrl && block.includes(options.clientLogoUrl)) ||
-            (options?.clientName &&
-              new RegExp(options.clientName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(
-                block,
-              )));
-        return looksLogoRow ? "" : block;
-      },
-    );
-
-    // Standalone Nexuses / client logos sitting above the title.
-    before = before.replace(
-      /(?:<(?:a|div|p|span)[^>]*>\s*)*<img[^>]*>\s*(?:<\/(?:a|div|p|span)>\s*)*/gi,
-      (block) => {
-        if (/Nexuses-full-logo|cdn-nexlink|nexuses/i.test(block)) return "";
-        if (options?.clientLogoUrl && block.includes(options.clientLogoUrl)) return "";
-        if (
-          options?.clientName &&
-          new RegExp(options.clientName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(block)
-        ) {
-          return "";
-        }
-        // Generic logo-looking image right above the title.
-        if (/logo|brand/i.test(block)) return "";
-        return block;
-      },
-    );
-
-    // Duplicate client name text (e.g. "Smiforce") above the title.
-    if (options?.clientName) {
-      const name = options.clientName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      before = before.replace(
-        new RegExp(
-          `<(p|div|span|h2|h3)[^>]*>\\s*(?:<[^>]+>\\s*)*${name}\\s*(?:<\\/[^>]+>\\s*)*<\\/\\1>`,
-          "gi",
-        ),
-        "",
-      );
-    }
-
-    next = `${before}${after}`;
-  }
-
-  return next.trim();
+/**
+ * Keep only content from the first H1 onward.
+ * Everything above the title is usually a duplicate logo bar from the model.
+ */
+function contentFromTitle(body: string) {
+  const h1Index = body.search(/<h1\b/i);
+  if (h1Index >= 0) return body.slice(h1Index).trim();
+  // No h1 — still strip known brand chrome.
+  return body
+    .replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "gi"), "")
+    .replace(/<p[^>]*class=["'][^"']*nx-brand[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "")
+    .replace(/<img[^>]*(?:Nexuses-full-logo|cdn-nexlink)[^>]*>/gi, "")
+    .trim();
 }
 
 function replaceOrInjectHeader(body: string, options?: ShareEnhanceOptions) {
-  const cleaned = stripDuplicateBrandChrome(body, options);
-  return `${buildReportHeader(options)}\n${cleaned}`;
+  return `${buildReportHeader(options)}\n${contentFromTitle(body)}`;
 }
 
 function ensureKitInHead(doc: string) {
@@ -260,7 +203,20 @@ function ensureKitInHead(doc: string) {
     padding-right: max(1.5rem, 5vw) !important;
     box-sizing: border-box !important;
   }
-  .nx-header { display:flex !important; align-items:center !important; justify-content:space-between !important; gap:1rem; width:100%; margin:0 0 1.75rem; padding:0 0 1.25rem; border-bottom:1px solid #ddd6cb; box-sizing:border-box; }
+  .nx-header {
+    display:flex !important;
+    align-items:center !important;
+    justify-content:space-between !important;
+    gap:1rem;
+    width:100%;
+    margin:0 0 1.75rem;
+    padding:0.25rem max(0.75rem, 2vw) 1.25rem !important;
+    border-bottom:1px solid #ddd6cb;
+    box-sizing:border-box;
+  }
+  .nx-header > a:first-child { margin-left: max(0.75rem, 2vw) !important; }
+  .nx-header .nx-client-logo,
+  .nx-header .nx-client-fallback { margin-right: max(0.75rem, 2vw) !important; }
   .nx-header img { display:block; height:40px; width:auto; max-width:180px; object-fit:contain; }
   .nx-header .nx-client-logo { height:44px; max-width:160px; }
   h1, h2, h3, .font-display { font-family: "Outfit", ui-sans-serif, system-ui, sans-serif !important; letter-spacing: -0.02em; font-weight: 700; }
