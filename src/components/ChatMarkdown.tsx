@@ -4,6 +4,7 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
 
 function unwrap(content: string) {
   const trimmed = content.trim();

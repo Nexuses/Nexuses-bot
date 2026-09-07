@@ -7,6 +7,7 @@ import {
 } from "@/lib/attachments";
 import { ensureAutomationRunner } from "@/lib/automations";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
+import { HTML_DASHBOARD_PROMPT } from "@/lib/html-dashboard-kit";
 import { getOwnedChat, serializeChat, titleFromText } from "@/lib/chats";
 import { redactSecrets } from "@/lib/integrations";
 import { complete, type ContentPart, type LlmMessage } from "@/lib/llm";
@@ -210,8 +211,9 @@ What the user sees (required):
 Formatting (required):
 - Write the final answer in clean Markdown. Use headings, short paragraphs, and bullet lists.
 - When showing 2 or more items with the same fields, use a Markdown table with a header row.
-- When showing HTML (page, email, invite), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons.
+- When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons.
 - If the user asks for a public link / share link for HTML, call share_html and give them the URL.
+${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on).
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user uploads a CSV for Attio, call attio_import_to_list once. Never import contacts one API call at a time.

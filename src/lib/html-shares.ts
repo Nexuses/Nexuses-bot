@@ -1,5 +1,6 @@
 import { randomBytes } from "crypto";
 import { dbConnect } from "@/lib/db";
+import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
 import { HtmlShare } from "@/models/HtmlShare";
 
 export const MAX_SHARE_HTML_CHARS = 400_000;
@@ -22,7 +23,7 @@ export function normalizeSharedHtml(raw: string) {
   if (html.length > MAX_SHARE_HTML_CHARS) {
     throw new Error("HTML is too large to share (max about 400KB)");
   }
-  if (!/<[a-z!/?]/i.test(html)) {
+  if (!/<[a-z!/?]/i.test(html) && !/\|/.test(html)) {
     throw new Error("That does not look like HTML");
   }
   return html;
@@ -44,8 +45,9 @@ export async function createHtmlShare(input: {
   origin?: string;
 }) {
   await dbConnect();
-  const html = normalizeSharedHtml(input.html);
+  const raw = normalizeSharedHtml(input.html);
   const title = (input.title || "Shared HTML").trim().slice(0, 120) || "Shared HTML";
+  const html = enhanceSharedHtml(raw, title);
   const publicId = makePublicId();
 
   await HtmlShare.create({
