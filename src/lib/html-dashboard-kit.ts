@@ -1,4 +1,8 @@
+import { NEXUSES_LOGO_URL } from "@/lib/brand";
+
 const KIT_MARK = "data-nexuses-kit";
+
+export { NEXUSES_LOGO_URL };
 
 /** Kept for callers; initial design does not inject logo headers. */
 export type ShareEnhanceOptions = {
@@ -167,7 +171,7 @@ ${KIT_HEAD}
 </head>
 <body>
 <main class="nx-shell">
-  <p class="nx-brand">Nexuses</p>
+  <p class="nx-brand"><img src="${NEXUSES_LOGO_URL}" alt="Nexuses" style="height:28px;width:auto;display:block;" /></p>
   ${body}
 </main>
 </body>
@@ -179,7 +183,10 @@ export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / 
 - Use Tailwind via CDN (cdn.tailwindcss.com) plus Chart.js (cdn.jsdelivr.net/npm/chart.js) when charts help.
 - Fonts: Syne for headings, DM Sans for body (Google Fonts).
 - Palette: background #f6f3ee, text #1c1916, accent #1e8a7a, borders #ddd6cb. Avoid purple gradients, neon glow, and emoji decoration.
-- Brand: show "Nexuses" as a small uppercase accent label near the top — do not overpower it with a giant unrelated headline.
+- Brand: use the Nexuses logo image (NOT text-only "NEXUSES") at the top-left of the header:
+  ${NEXUSES_LOGO_URL}
+  Example: <img src="${NEXUSES_LOGO_URL}" alt="Nexuses" style="height:36px;width:auto;" />
+  Put the project/client logo on the right when available. Do not invent another Nexuses logo URL.
 - Layout: one clear hero title + short subtitle, then a row of KPI stat cards, then one chart and/or one real HTML <table> (never markdown pipe tables inside HTML).
 - Make rows scannable; use rounded-3xl cards, soft shadow, generous padding. Mobile-friendly.
 - Prefer semantic HTML + Tailwind utility classes. No React. Inline a small <script> only for Chart.js.`;

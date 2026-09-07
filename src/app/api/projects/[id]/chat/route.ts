@@ -244,6 +244,7 @@ ${HTML_DASHBOARD_PROMPT}
 
 Connected APIs: ${connected.length ? connected.join(", ") : "none yet"}.
 Project: ${project.name}. Project logo URL (use as client logo on the right of HTML report headers unless the user gives another): ${project.logo || "none — ask the user for the client logo URL if making a branded dashboard"}.
+Nexuses logo URL (always available — use this image for Nexuses branding in HTML/emails/reports; do not invent another): https://cdn-nexlink.s3.us-east-2.amazonaws.com/Nexuses-full-logo-dark_8d412ea3-bf11-4fc6-af9c-bee7e51ef494.png.
 ${providerGuide(integrations)}`;
 
   const llmMessages: LlmMessage[] = [

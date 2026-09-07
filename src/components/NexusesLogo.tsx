@@ -1,5 +1,6 @@
-const LOGO_SRC =
-  "https://cdn-nexlink.s3.us-east-2.amazonaws.com/Nexuses-full-logo-dark_8d412ea3-bf11-4fc6-af9c-bee7e51ef494.png";
+import { NEXUSES_LOGO_URL } from "@/lib/brand";
+
+export { NEXUSES_LOGO_URL };
 
 export function NexusesLogo({
   className = "h-8 w-auto max-w-[160px]",
@@ -8,7 +9,7 @@ export function NexusesLogo({
 }) {
   return (
     <img
-      src={LOGO_SRC}
+      src={NEXUSES_LOGO_URL}
       alt="Nexuses"
       className={`object-contain object-left ${className}`}
       referrerPolicy="no-referrer"
