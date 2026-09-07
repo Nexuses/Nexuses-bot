@@ -4,6 +4,7 @@ import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
 import {
   buildNotionAuthorizeUrl,
   notionOauthConfigured,
+  notionPublicOrigin,
   notionRedirectUri,
 } from "@/lib/oauth/notion";
 import { signOauthState } from "@/lib/oauth/state";
@@ -13,11 +14,26 @@ import { Project } from "@/models/Project";
 
 type Params = { params: Promise<{ provider: string }> };
 
+function requestOrigin(request: NextRequest) {
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  if (forwardedHost) {
+    const proto =
+      forwardedProto ||
+      (forwardedHost.startsWith("localhost") || forwardedHost.startsWith("127.")
+        ? "http"
+        : "https");
+    return `${proto}://${forwardedHost}`;
+  }
+  return request.nextUrl.origin;
+}
+
 export async function GET(request: NextRequest, { params }: Params) {
   const { provider: rawProvider } = await params;
   const provider = rawProvider.trim().toLowerCase();
   const projectId = request.nextUrl.searchParams.get("projectId") || "";
-  const origin = request.nextUrl.origin;
+  const detected = requestOrigin(request);
+  const origin = notionPublicOrigin(detected);
 
   if (!isOauthProvider(provider)) {
     return NextResponse.redirect(
@@ -60,7 +76,7 @@ export async function GET(request: NextRequest, { params }: Params) {
     );
   }
 
-  const redirectUri = notionRedirectUri(origin);
+  const redirectUri = notionRedirectUri(detected);
   const state = await signOauthState({
     userId: session.userId,
     projectId,

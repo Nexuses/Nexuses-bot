@@ -22,17 +22,48 @@ export function notionClientSecret() {
   return secret;
 }
 
-/** Prefer the live request host so local ≠ prod aren't stuck on APP_URL=localhost. */
-export function notionRedirectUri(requestOrigin?: string) {
-  const fromRequest = (requestOrigin || "").trim().replace(/\/$/, "");
-  if (fromRequest && /^https?:\/\//i.test(fromRequest)) {
-    return `${fromRequest}/api/oauth/notion/callback`;
-  }
+/** Public origin for OAuth. Prefer APP_URL (canonical per deploy); never use https://localhost. */
+export function notionPublicOrigin(requestOrigin?: string) {
   const fromEnv = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "")
     .trim()
     .replace(/\/$/, "");
-  if (fromEnv) return `${fromEnv}/api/oauth/notion/callback`;
-  return "http://localhost:3000/api/oauth/notion/callback";
+  const fromRequest = (requestOrigin || "").trim().replace(/\/$/, "");
+
+  const hostOf = (origin: string) => {
+    try {
+      return new URL(origin).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+  const isLoopback = (origin: string) => {
+    const host = hostOf(origin);
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  };
+  const normalize = (origin: string) => {
+    if (!origin) return "";
+    try {
+      const url = new URL(origin);
+      // Notion redirect URIs for local are almost always http://localhost:3000
+      if (isLoopback(origin) && url.protocol === "https:") {
+        url.protocol = "http:";
+      }
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return origin;
+    }
+  };
+
+  // Canonical deploy URL wins (prod must set APP_URL=https://bot.nexuses-online.com).
+  if (fromEnv) return normalize(fromEnv);
+
+  if (fromRequest && !isLoopback(fromRequest)) return normalize(fromRequest);
+  if (fromRequest) return normalize(fromRequest);
+  return "http://localhost:3000";
+}
+
+export function notionRedirectUri(requestOrigin?: string) {
+  return `${notionPublicOrigin(requestOrigin)}/api/oauth/notion/callback`;
 }
 
 export function buildNotionAuthorizeUrl(input: {
