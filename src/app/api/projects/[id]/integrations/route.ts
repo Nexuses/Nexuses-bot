@@ -49,23 +49,63 @@ export async function POST(request: Request, { params }: Params) {
     if (provider === "other" && name.length < 2) return jsonError("Give this API a name");
 
     const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
-    const mcpUrl =
-      provider === "brevo"
-        ? validated.mcpUrl ?? ""
-        : normalizeMcpUrl(String(body.mcpUrl ?? ""));
 
-    const saved = await upsertIntegrationDoc({
-      userId: session.userId,
-      projectId: id,
-      provider,
-      name,
-      apiKey,
-      baseUrl,
-      mcpUrl,
-      authType,
-    });
+    let saved;
+    if (provider === "brevo") {
+      const existing = await Integration.findOne({
+        userId: session.userId,
+        projectId: id,
+        provider: "brevo",
+      });
+      const isRestKey = !validated.mcpUrl;
+      if (existing?.mcpUrl && isRestKey) {
+        saved = await upsertIntegrationDoc({
+          userId: session.userId,
+          projectId: id,
+          provider,
+          name,
+          apiKey,
+          restOnly: true,
+        });
+      } else if (existing && !existing.mcpUrl && validated.mcpUrl) {
+        saved = await upsertIntegrationDoc({
+          userId: session.userId,
+          projectId: id,
+          provider,
+          name,
+          apiKey,
+          restApiKey: existing.apiKey,
+          mcpUrl: validated.mcpUrl,
+          authType,
+        });
+      } else {
+        saved = await upsertIntegrationDoc({
+          userId: session.userId,
+          projectId: id,
+          provider,
+          name,
+          apiKey,
+          restApiKey: existing?.restApiKey || "",
+          mcpUrl: validated.mcpUrl ?? "",
+          authType,
+        });
+      }
+    } else {
+      saved = await upsertIntegrationDoc({
+        userId: session.userId,
+        projectId: id,
+        provider,
+        name,
+        apiKey,
+        baseUrl,
+        mcpUrl: normalizeMcpUrl(String(body.mcpUrl ?? "")),
+        authType,
+      });
+    }
 
-    const { apiKey: _apiKey, ...integration } = saved;
+    const { apiKey: _apiKey, restApiKey: _rest, ...integration } = saved as typeof saved & {
+      restApiKey?: string;
+    };
     return ok({ integration }, 201);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not save integration";

@@ -9,6 +9,8 @@ export type IntegrationDTO = {
   mcpUrl: string;
   authType: AuthType;
   keyHint: string;
+  /** True when a classic Brevo REST API key is saved alongside MCP. */
+  hasRestApiKey?: boolean;
 };
 
 export type ChatAttachment = {

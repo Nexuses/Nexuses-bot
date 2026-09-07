@@ -55,14 +55,15 @@ function providerGuide(integrations: StoredIntegration[]) {
   if (integrations.some((item) => item.provider === "brevo")) {
     const brevo = integrations.find((item) => item.provider === "brevo");
     if (brevo?.mcpUrl) {
-      parts.push(`Brevo is connected via MCP.
-- For campaigns / completed / sent campaigns: call brevo_list_campaigns once. Use status "sent" ONLY if the user asked for completed/sent. For "partial list" / "list campaigns", omit status (all campaigns). The tool returns a compact summary without HTML — never call raw MCP campaign list tools for this.
-- To explore other MCP actions: call brevo_mcp_list_tools with query (e.g. "campaign", "contact"). Never list the full unfiltered catalog.
-- Then call brevo_mcp_call with an exact tool name from that filtered list.
-- Keep Attio updated automatically until a campaign completes: call start_campaign_automation with source brevo, campaign, and attio_list.`);
+      parts.push(`Brevo is connected via MCP${integrations.find((i) => i.provider === "brevo")?.restApiKey ? " + REST API key" : ""}.
+- For campaigns / partial lists: call brevo_list_campaigns (omit status unless user asked for sent/draft).
+- For who opened / clicked a campaign: call brevo_people_by_event once with campaign + event (opens/clicks). Do not say this is impossible.
+- If brevo_people_by_event returns needsRestApiKey, ask the user to paste a standard Brevo API key (Settings → SMTP & API → API key WITHOUT the MCP option) and call connect_integration — it adds REST alongside MCP on the same Brevo connection. Do not ask for two separate Brevo apps.
+- To explore other MCP actions: brevo_mcp_list_tools with a query. Then brevo_mcp_call with an exact name.
+- Keep Attio updated automatically until a campaign completes: start_campaign_automation with source brevo.`);
     } else {
       parts.push(
-        `Brevo is connected via REST API. Create contacts with brevo_create_contact. For lists, campaigns, or sending, use brevo_api with /v3/ paths. For fuller data access, reconnect Brevo with an MCP key from Brevo → SMTP & API → API Keys (enable Create MCP server API key).`,
+        `Brevo is connected via REST API. List campaigns with brevo_list_campaigns. Who opened/clicked: brevo_people_by_event. Create contacts with brevo_create_contact. For other actions use brevo_api with /v3/ paths. For fuller MCP tools, also connect an MCP key ( Brevo keeps both on one integration).`,
       );
     }
   }
@@ -175,6 +176,7 @@ export async function POST(request: Request, { params }: Params) {
     provider: doc.provider,
     name: doc.name,
     apiKey: doc.apiKey,
+    restApiKey: doc.restApiKey || "",
     baseUrl: doc.baseUrl,
     mcpUrl: doc.mcpUrl,
     authType: doc.authType,
@@ -214,7 +216,8 @@ Formatting (required):
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user uploads a CSV for Attio, call attio_import_to_list once. Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
-- If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns. Do not guess Brevo MCP tool names.
+- If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
+- If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once. Do not claim it is impossible. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.
 - Stay on the product the user is talking about. A Lemlist question is not an Attio import.
 
 Connected APIs: ${connected.length ? connected.join(", ") : "none yet"}.

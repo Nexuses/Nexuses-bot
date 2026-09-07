@@ -49,6 +49,7 @@ export function statusForTool(name: string) {
     brevo_create_contact: "Adding a contact in Brevo…",
     brevo_list_contacts: "Loading Brevo contacts…",
     brevo_list_campaigns: "Loading Brevo campaigns…",
+    brevo_people_by_event: "Collecting people from the Brevo campaign…",
     brevo_api: "Talking to Brevo…",
     lemlist_list_campaigns: "Loading Lemlist campaigns…",
     lemlist_people_by_event: "Collecting people from the campaign…",

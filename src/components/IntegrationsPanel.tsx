@@ -9,7 +9,8 @@ const CATALOG: { provider: Exclude<Provider, "other">; title: string; blurb: str
   {
     provider: "brevo",
     title: "Brevo",
-    blurb: "Use an MCP key for full campaign/contact data, or a normal API key",
+    blurb:
+      "MCP key for campaigns; add a normal API key too for who opened/clicked (same connection)",
   },
   { provider: "lemlist", title: "Lemlist", blurb: "Outreach campaigns, leads, activity" },
 ];
@@ -142,9 +143,11 @@ export function IntegrationsPanel({
                       <p className="mt-1 text-xs text-sea">
                         Connected
                         {item.provider === "brevo"
-                          ? connected.mcpUrl
-                            ? " via MCP"
-                            : " via API"
+                          ? connected.mcpUrl && connected.hasRestApiKey
+                            ? " via MCP + API"
+                            : connected.mcpUrl
+                              ? " via MCP"
+                              : " via API"
                           : ""}{" "}
                         · {connected.keyHint}
                       </p>
@@ -179,6 +182,30 @@ export function IntegrationsPanel({
                     />
                     <PrimaryButton type="submit" tone="sea" disabled={busy === item.provider}>
                       {busy === item.provider ? "Connecting..." : `Connect ${item.title}`}
+                    </PrimaryButton>
+                  </form>
+                ) : item.provider === "brevo" && connected.mcpUrl && !connected.hasRestApiKey ? (
+                  <form
+                    className="mt-3 space-y-3"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void connect("brevo");
+                    }}
+                  >
+                    <p className="text-xs text-muted">
+                      Add a normal Brevo API key (not MCP) so we can list who opened/clicked.
+                    </p>
+                    <Field
+                      label="Standard API key"
+                      type="password"
+                      value={keys.brevo ?? ""}
+                      onChange={(event) =>
+                        setKeys((current) => ({ ...current, brevo: event.target.value }))
+                      }
+                      required
+                    />
+                    <PrimaryButton type="submit" tone="sea" disabled={busy === "brevo"}>
+                      {busy === "brevo" ? "Saving..." : "Add API key"}
                     </PrimaryButton>
                   </form>
                 ) : null}

@@ -11,6 +11,8 @@ const IntegrationSchema = new Schema(
     },
     name: { type: String, required: true, trim: true },
     apiKey: { type: String, required: true },
+    /** Classic Brevo REST API key when apiKey is an MCP-only token. */
+    restApiKey: { type: String, default: "" },
     baseUrl: { type: String, trim: true, default: "" },
     mcpUrl: { type: String, trim: true, default: "" },
     authType: {

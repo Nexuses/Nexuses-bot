@@ -4,6 +4,7 @@ import {
   startCampaignAutomation,
   stopAutomation,
 } from "@/lib/automations";
+import { brevoPeopleByEvent } from "@/lib/brevo-recipients";
 import {
   callBrevoMcpTool,
   filterBrevoMcpTools,
@@ -23,6 +24,7 @@ import {
   upsertIntegrationDoc,
   maskKey,
 } from "@/lib/integrations";
+import { Integration } from "@/models/Integration";
 import { createHtmlShare } from "@/lib/html-shares";
 import type { ToolDef } from "@/lib/llm";
 import type { AuthType, Provider } from "@/types/chat";
@@ -32,6 +34,7 @@ export type StoredIntegration = {
   provider: Provider;
   name: string;
   apiKey: string;
+  restApiKey?: string;
   baseUrl?: string;
   mcpUrl?: string;
   authType?: AuthType;
@@ -923,27 +926,49 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
   if (has("brevo")) {
     const brevo = integrations.find((item) => item.provider === "brevo");
     // Always expose campaign listing — works for MCP and REST keys.
-    tools.push({
-      type: "function",
-      function: {
-        name: "brevo_list_campaigns",
-        description:
-          "List Brevo email campaigns as a compact summary (name, subject, status, dates, stats — NO HTML). Use for any campaign list / partial list. Only set status when the user asks for a specific status (sent/completed, draft, etc.). Default is ALL campaigns.",
-        parameters: {
-          type: "object",
-          properties: {
-            status: {
-              type: "string",
-              description:
-                "Optional filter only when user asks: sent, draft, queued, suspended, archive, in_process. Leave empty for a partial/full list of all campaigns.",
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "brevo_list_campaigns",
+          description:
+            "List Brevo email campaigns as a compact summary (name, subject, status, dates, stats — NO HTML). Use for any campaign list / partial list. Only set status when the user asks for a specific status (sent/completed, draft, etc.). Default is ALL campaigns.",
+          parameters: {
+            type: "object",
+            properties: {
+              status: {
+                type: "string",
+                description:
+                  "Optional filter only when user asks: sent, draft, queued, suspended, archive, in_process. Leave empty for a partial/full list of all campaigns.",
+              },
+              limit: { type: "number", description: "Max campaigns, default 50" },
+              offset: { type: "number" },
             },
-            limit: { type: "number", description: "Max campaigns, default 50" },
-            offset: { type: "number" },
+            additionalProperties: false,
           },
-          additionalProperties: false,
         },
       },
-    });
+      {
+        type: "function",
+        function: {
+          name: "brevo_people_by_event",
+          description:
+            "List individual emails who opened or clicked a Brevo campaign (or other recipient types). Use when the user asks who opened / clicked / drill-down people for a campaign. Prefer this over guessing MCP tools.",
+          parameters: {
+            type: "object",
+            properties: {
+              campaign: { type: "string", description: "Campaign name or id" },
+              event: {
+                type: "string",
+                description: "opens, clicks, unsubscribed, softBounces, hardBounces, all",
+              },
+            },
+            required: ["campaign"],
+            additionalProperties: false,
+          },
+        },
+      },
+    );
 
     if (brevo?.mcpUrl) {
       tools.push(
@@ -1279,26 +1304,70 @@ export async function runTool(
     const label = displayProviderName(provider, String(args.name || ""));
     context.onStatus?.(`Connecting ${label} and checking the API key…`);
     const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
-    const mcpUrl =
-      provider === "brevo"
-        ? validated.mcpUrl ?? ""
-        : normalizeMcpUrl(String(args.mcp_url || args.mcpUrl || ""));
-    const saved = await upsertIntegrationDoc({
-      userId: context.userId,
-      projectId: context.projectId,
-      provider,
-      name: label,
-      apiKey,
-      baseUrl,
-      mcpUrl,
-      authType,
-    });
+
+    let saved;
+    if (provider === "brevo") {
+      const existing = await Integration.findOne({
+        userId: context.userId,
+        projectId: context.projectId,
+        provider: "brevo",
+      });
+      const isRestKey = !validated.mcpUrl;
+      if (existing?.mcpUrl && isRestKey) {
+        // Keep MCP token; add classic REST key for recipient exports.
+        saved = await upsertIntegrationDoc({
+          userId: context.userId,
+          projectId: context.projectId,
+          provider,
+          name: label,
+          apiKey,
+          restOnly: true,
+        });
+      } else if (existing && !existing.mcpUrl && validated.mcpUrl) {
+        // Upgrading REST connection to MCP — keep previous key as restApiKey.
+        saved = await upsertIntegrationDoc({
+          userId: context.userId,
+          projectId: context.projectId,
+          provider,
+          name: label,
+          apiKey,
+          restApiKey: existing.apiKey,
+          mcpUrl: validated.mcpUrl,
+          authType,
+        });
+      } else {
+        saved = await upsertIntegrationDoc({
+          userId: context.userId,
+          projectId: context.projectId,
+          provider,
+          name: label,
+          apiKey,
+          restApiKey: existing?.restApiKey || "",
+          mcpUrl: validated.mcpUrl ?? "",
+          authType,
+        });
+      }
+    } else {
+      const mcpUrl = normalizeMcpUrl(String(args.mcp_url || args.mcpUrl || ""));
+      saved = await upsertIntegrationDoc({
+        userId: context.userId,
+        projectId: context.projectId,
+        provider,
+        name: label,
+        apiKey,
+        baseUrl,
+        mcpUrl,
+        authType,
+      });
+    }
+
     context.secretsUsed?.push(apiKey);
     const stored: StoredIntegration = {
       _id: saved._id,
       provider: saved.provider,
       name: saved.name,
       apiKey: saved.apiKey,
+      restApiKey: saved.restApiKey || "",
       baseUrl: saved.baseUrl,
       mcpUrl: saved.mcpUrl,
       authType: saved.authType,
@@ -1309,16 +1378,28 @@ export async function runTool(
         : [...integrations.filter((item) => item.provider !== provider), stored];
     integrations.splice(0, integrations.length, ...next);
     context.onIntegrationsChange?.(integrations);
+    const mode =
+      provider === "brevo"
+        ? saved.mcpUrl && saved.hasRestApiKey
+          ? "mcp+rest"
+          : saved.mcpUrl
+            ? "mcp"
+            : "api"
+        : null;
     return clip({
       ok: true,
       connected: saved.name,
       provider: saved.provider,
       keyHint: saved.keyHint,
-      mode: provider === "brevo" ? (saved.mcpUrl ? "mcp" : "api") : null,
+      mode,
       mcpUrl: saved.mcpUrl || null,
-      note: saved.mcpUrl
-        ? `${saved.name} is connected via MCP. You can fetch campaigns, contacts, and analytics through Brevo MCP tools now.`
-        : `${saved.name} is connected. You can use its tools now in this chat.`,
+      hasRestApiKey: Boolean(saved.hasRestApiKey),
+      note:
+        mode === "mcp+rest"
+          ? "Brevo MCP + REST API key are both saved on one connection. Campaign lists use MCP; who opened/clicked uses REST export."
+          : mode === "mcp"
+            ? "Brevo is connected via MCP. For who opened/clicked a campaign, also paste a standard Brevo API key (not MCP-only) and say connect Brevo — we will add it alongside MCP."
+            : `${saved.name} is connected. You can use its tools now in this chat.`,
     });
   }
 
@@ -1554,31 +1635,25 @@ export async function runTool(
       status ? `Loading Brevo campaigns (${status})…` : "Loading Brevo campaigns…",
     );
 
-    if (!brevo.mcpUrl) {
-      const qs = new URLSearchParams({
-        limit: String(limit),
-        offset: String(offset),
-        excludeHtmlContent: "true",
-      });
-      if (status) qs.set("status", status);
-      const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
-        headers: brevoHeaders(brevo.apiKey),
-      });
-      return clip({ mode: "rest", ...summarizeBrevoCampaigns(data, { limit }) });
+    const restKey = (brevo.restApiKey || (!brevo.mcpUrl ? brevo.apiKey : "")).trim();
+    if (restKey) {
+      try {
+        const qs = new URLSearchParams({
+          limit: String(limit),
+          offset: String(offset),
+          excludeHtmlContent: "true",
+        });
+        if (status) qs.set("status", status);
+        const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
+          headers: brevoHeaders(restKey),
+        });
+        return clip({ mode: "rest", ...summarizeBrevoCampaigns(data, { limit }) });
+      } catch {
+        // fall through to MCP when REST fails
+      }
     }
 
-    try {
-      const qs = new URLSearchParams({
-        limit: String(limit),
-        offset: String(offset),
-        excludeHtmlContent: "true",
-      });
-      if (status) qs.set("status", status);
-      const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
-        headers: brevoHeaders(brevo.apiKey),
-      });
-      return clip({ mode: "rest", ...summarizeBrevoCampaigns(data, { limit }) });
-    } catch {
+    if (brevo.mcpUrl) {
       const viaMcp = await listBrevoCampaignsViaMcp(brevo.apiKey, {
         status: status || undefined,
         limit,
@@ -1586,6 +1661,23 @@ export async function runTool(
       });
       return clip(viaMcp);
     }
+
+    throw new Error("Brevo is not connected");
+  }
+
+  if (name === "brevo_people_by_event") {
+    const brevo = findByProvider(integrations, "brevo");
+    const campaign = String(args.campaign || args.campaignName || "").trim();
+    if (!campaign) throw new Error("Campaign name is required");
+    const result = await brevoPeopleByEvent({
+      apiKey: brevo.apiKey,
+      restApiKey: brevo.restApiKey,
+      mcpUrl: brevo.mcpUrl,
+      campaign,
+      event: String(args.event || args.type || "opens"),
+      onStatus: context.onStatus,
+    });
+    return clip(result);
   }
 
   if (name === "brevo_api") {

@@ -8,9 +8,12 @@ export type StoredIntegrationInput = {
   provider: Provider;
   name: string;
   apiKey: string;
+  restApiKey?: string;
   baseUrl?: string;
   mcpUrl?: string;
   authType?: AuthType;
+  /** When true, keep existing apiKey/mcpUrl and only set restApiKey. */
+  restOnly?: boolean;
 };
 
 const PROVIDERS = new Set<Provider>(["attio", "brevo", "lemlist", "other"]);
@@ -52,7 +55,7 @@ export { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 
 export async function upsertIntegrationDoc(
   input: StoredIntegrationInput,
-): Promise<IntegrationDTO & { apiKey: string }> {
+): Promise<IntegrationDTO & { apiKey: string; restApiKey: string }> {
   if (!PROVIDERS.has(input.provider)) {
     throw new Error("Choose Attio, Brevo, Lemlist, or Other");
   }
@@ -74,20 +77,28 @@ export async function upsertIntegrationDoc(
 
   const doc = await Integration.findOneAndUpdate(
     query,
-    {
-      userId: input.userId,
-      projectId: input.projectId,
-      provider: input.provider,
-      name: input.name.trim(),
-      apiKey,
-      baseUrl: (input.baseUrl || "").trim().replace(/\/$/, ""),
-      mcpUrl: (input.mcpUrl || "").trim().replace(/\/$/, ""),
-      authType: input.authType ?? "bearer",
-    },
+    input.restOnly
+      ? {
+          $set: {
+            restApiKey: apiKey,
+            name: input.name.trim(),
+          },
+        }
+      : {
+          userId: input.userId,
+          projectId: input.projectId,
+          provider: input.provider,
+          name: input.name.trim(),
+          apiKey,
+          restApiKey: (input.restApiKey || "").trim(),
+          baseUrl: (input.baseUrl || "").trim().replace(/\/$/, ""),
+          mcpUrl: (input.mcpUrl || "").trim().replace(/\/$/, ""),
+          authType: input.authType ?? "bearer",
+        },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
 
-  return { ...serializeIntegration(doc), apiKey: doc.apiKey };
+  return { ...serializeIntegration(doc), apiKey: doc.apiKey, restApiKey: doc.restApiKey || "" };
 }
 
 export async function removeIntegrationDoc(input: {

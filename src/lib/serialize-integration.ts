@@ -5,6 +5,7 @@ type LeanIntegration = {
   provider: Provider;
   name: string;
   apiKey?: string;
+  restApiKey?: string;
   baseUrl?: string;
   mcpUrl?: string;
   authType?: AuthType;
@@ -25,5 +26,6 @@ export function serializeIntegration(doc: LeanIntegration): IntegrationDTO {
     mcpUrl: doc.mcpUrl ?? "",
     authType: doc.authType ?? "bearer",
     keyHint: maskKey(doc.apiKey ?? ""),
+    hasRestApiKey: Boolean(doc.restApiKey),
   };
 }
