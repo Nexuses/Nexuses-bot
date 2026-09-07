@@ -150,14 +150,17 @@ export function buildReportHeader(options?: ShareEnhanceOptions) {
   const clientLogo = (options?.clientLogoUrl || "").trim();
   const clientName = (options?.clientName || "").trim() || "Client";
   const right = clientLogo
-    ? `<img class="nx-client-logo" src="${escapeAttr(clientLogo)}" alt="${escapeAttr(clientName)} logo" referrerpolicy="no-referrer" />`
-    : `<span class="nx-client-fallback">${escapeHtml(clientName)}</span>`;
+    ? `<img class="nx-client-logo" src="${escapeAttr(clientLogo)}" alt="${escapeAttr(clientName)}" referrerpolicy="no-referrer" style="display:block;height:44px;width:auto;max-width:160px;object-fit:contain;" />`
+    : `<span class="nx-client-fallback" style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.85rem;font-weight:700;color:#1e8a7a;letter-spacing:0.04em;text-transform:uppercase;border:1px solid #ddd6cb;border-radius:999px;padding:0.55rem 0.9rem;background:rgba(255,255,255,0.7);">${escapeHtml(clientName)}</span>`;
 
-  return `<header class="nx-header" ${HEADER_MARK}>
-  <a href="https://nexuses.com" style="display:inline-flex;align-items:center" aria-label="Nexuses">
-    <img src="${escapeAttr(NEXUSES_LOGO_URL)}" alt="Nexuses" referrerpolicy="no-referrer" />
+  // Inline flex styles so logos stay left/right even when kit CSS is missing from the page.
+  return `<header class="nx-header" ${HEADER_MARK} style="display:flex;align-items:center;justify-content:space-between;gap:1rem;width:100%;margin:0 0 1.75rem;padding:0 0 1.25rem;border-bottom:1px solid #ddd6cb;box-sizing:border-box;">
+  <a href="https://nexuses.com" aria-label="Nexuses" style="display:inline-flex;align-items:center;flex:0 0 auto;">
+    <img src="${escapeAttr(NEXUSES_LOGO_URL)}" alt="Nexuses" referrerpolicy="no-referrer" style="display:block;height:40px;width:auto;max-width:180px;object-fit:contain;" />
   </a>
-  ${right}
+  <div style="display:inline-flex;align-items:center;justify-content:flex-end;flex:0 0 auto;margin-left:auto;">
+    ${right}
+  </div>
 </header>`;
 }
 
@@ -170,16 +173,46 @@ function looksStyled(html: string) {
   );
 }
 
+function stripDuplicateBrandChrome(body: string) {
+  let next = body;
+  // Our previous injected header.
+  next = next.replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "i"), "");
+  // Text-only Nexuses brand label / eyebrow.
+  next = next.replace(/<p[^>]*class=["'][^"']*nx-brand[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "");
+  next = next.replace(
+    /<(p|div|span)[^>]*>\s*(?:<[^>]+>\s*)*NEXUSES\s*(?:<\/[^>]+>\s*)*<\/\1>/gi,
+    "",
+  );
+  // Bot-made logo bars that stack Nexuses + client logos before the title.
+  next = next.replace(
+    /<(header|div)[^>]*(?:logo|brand|header)[^>]*>[\s\S]*?(?=<h1\b)/i,
+    "",
+  );
+  // Leading images of the Nexuses CDN logo outside our header.
+  next = next.replace(
+    /(?:<(?:a|div|p)[^>]*>\s*)*<img[^>]*Nexuses-full-logo[^>]*>\s*(?:<\/(?:a|div|p)>\s*)*/gi,
+    "",
+  );
+  return next.trim();
+}
+
 function replaceOrInjectHeader(body: string, options?: ShareEnhanceOptions) {
-  const header = buildReportHeader(options);
-  // Drop old text-only Nexuses brand label.
-  let next = body.replace(/<p[^>]*class=["'][^"']*nx-brand[^"']*["'][^>]*>[\s\S]*?<\/p>/i, "");
-  if (new RegExp(HEADER_MARK, "i").test(next)) {
-    next = next.replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "i"), header);
-  } else {
-    next = `${header}\n${next}`;
+  const cleaned = stripDuplicateBrandChrome(body);
+  return `${buildReportHeader(options)}\n${cleaned}`;
+}
+
+function ensureKitInHead(doc: string) {
+  if (doc.includes("data-nexuses-kit-css")) return doc;
+  const cssBlock = `<style data-nexuses-kit-css>
+  .nx-header { display:flex !important; align-items:center !important; justify-content:space-between !important; gap:1rem; width:100%; margin:0 0 1.75rem; padding:0 0 1.25rem; border-bottom:1px solid #ddd6cb; box-sizing:border-box; }
+  .nx-header img { display:block; height:40px; width:auto; max-width:180px; object-fit:contain; }
+  .nx-header .nx-client-logo { height:44px; max-width:160px; }
+  h1, h2, h3, .font-display { font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif !important; letter-spacing: -0.02em; font-weight: 700; }
+</style>`;
+  if (/<\/head>/i.test(doc)) {
+    return doc.replace(/<\/head>/i, `${cssBlock}\n</head>`);
   }
-  return next;
+  return doc;
 }
 
 /**
@@ -198,11 +231,18 @@ export function enhanceSharedHtml(raw: string, options?: ShareEnhanceOptions | s
 
   if (looksStyled(html) && /<html[\s>]/i.test(html)) {
     let doc = html.includes(KIT_MARK) ? html : html.replace(/<html/i, `<html ${KIT_MARK}`);
-    // Swap ultra-wide Syne if present.
     doc = doc
       .replace(/family=Syne[^"&]*/gi, "family=Plus+Jakarta+Sans:wght@500;600;700;800")
       .replace(/["']Syne["']/g, '"Plus Jakarta Sans"')
       .replace(/font-family:\s*Syne/gi, 'font-family: "Plus Jakarta Sans"');
+    // Ensure Plus Jakarta Sans is available.
+    if (!/Plus\+Jakarta\+Sans|Plus Jakarta Sans/i.test(doc)) {
+      doc = doc.replace(
+        /<\/head>/i,
+        `<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />\n</head>`,
+      );
+    }
+    doc = ensureKitInHead(doc);
     const bodyMatch = doc.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
     if (bodyMatch) {
       const newBody = replaceOrInjectHeader(bodyMatch[1], opts);
