@@ -137,6 +137,14 @@ export function enhanceSharedHtml(raw: string, titleHint?: string) {
   if (!html) return html;
 
   html = markdownTablesToHtml(html);
+  // Upgrade older shares that still hardcode Syne headings.
+  html = html
+    .replace(/family=Syne:[^"'&\s]+/g, "family=Outfit:wght@500;600;700")
+    .replace(/"Syne"/g, '"Outfit"')
+    .replace(/'Syne'/g, "'Outfit'")
+    .replace(/font-family:\s*Syne/gi, "font-family: Outfit")
+    .replace(/\bSyne\b/g, "Outfit");
+
   const title = titleHint || extractTitle(html);
 
   if (looksStyled(html) && /<html[\s>]/i.test(html)) {
