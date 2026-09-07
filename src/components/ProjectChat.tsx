@@ -568,11 +568,6 @@ export function ProjectChat({
                       clientName={project.name}
                     />
                   )}
-                  {message.toolsUsed?.length ? (
-                    <p className="mt-3 text-xs text-muted">
-                      Used {message.toolsUsed.join(", ")}
-                    </p>
-                  ) : null}
                 </div>
               </article>
             ))
