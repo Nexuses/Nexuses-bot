@@ -435,31 +435,46 @@ const components: Components = {
   },
 };
 
-export function ChatMarkdown({ content }: { content: string }) {
+export function ChatMarkdown({
+  content,
+  projectId,
+  clientLogoUrl,
+  clientName,
+}: {
+  content: string;
+  projectId?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
   const prepared = repairMarkdownTables(unwrap(content));
   const standalone = extractStandaloneHtml(prepared);
+  const branding = { projectId, clientLogoUrl, clientName };
 
   if (standalone) {
     return (
-      <div className="chat-md space-y-3">
-        <div className="overflow-hidden rounded-2xl border border-line bg-ink-2">
-          <div className="flex items-center justify-between gap-3 border-b border-line/80 px-4 py-2">
-            <span className="text-xs uppercase tracking-[0.14em] text-muted">HTML</span>
-            <HtmlActions html={standalone} />
+      <BrandingContext.Provider value={branding}>
+        <div className="chat-md space-y-3">
+          <div className="overflow-hidden rounded-2xl border border-line bg-ink-2">
+            <div className="flex items-center justify-between gap-3 border-b border-line/80 px-4 py-2">
+              <span className="text-xs uppercase tracking-[0.14em] text-muted">HTML</span>
+              <HtmlActions html={standalone} />
+            </div>
+            <pre className="overflow-x-auto px-4 py-3 text-sm leading-6 text-paper">
+              <code className="font-mono text-[13px]">{standalone}</code>
+            </pre>
           </div>
-          <pre className="overflow-x-auto px-4 py-3 text-sm leading-6 text-paper">
-            <code className="font-mono text-[13px]">{standalone}</code>
-          </pre>
         </div>
-      </div>
+      </BrandingContext.Provider>
     );
   }
 
   return (
-    <div className="chat-md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {prepared}
-      </ReactMarkdown>
-    </div>
+    <BrandingContext.Provider value={branding}>
+      <div className="chat-md">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+          {prepared}
+        </ReactMarkdown>
+      </div>
+    </BrandingContext.Provider>
   );
 }
