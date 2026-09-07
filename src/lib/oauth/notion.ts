@@ -1,5 +1,3 @@
-import { getAppOrigin } from "@/lib/html-shares";
-
 const NOTION_AUTH = "https://api.notion.com/v1/oauth/authorize";
 const NOTION_TOKEN = "https://api.notion.com/v1/oauth/token";
 const NOTION_API = "https://api.notion.com";
@@ -24,20 +22,28 @@ export function notionClientSecret() {
   return secret;
 }
 
-export function notionRedirectUri(origin?: string) {
-  return `${getAppOrigin(origin)}/api/oauth/notion/callback`;
+/** Prefer the live request host so local ≠ prod aren't stuck on APP_URL=localhost. */
+export function notionRedirectUri(requestOrigin?: string) {
+  const fromRequest = (requestOrigin || "").trim().replace(/\/$/, "");
+  if (fromRequest && /^https?:\/\//i.test(fromRequest)) {
+    return `${fromRequest}/api/oauth/notion/callback`;
+  }
+  const fromEnv = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "")
+    .trim()
+    .replace(/\/$/, "");
+  if (fromEnv) return `${fromEnv}/api/oauth/notion/callback`;
+  return "http://localhost:3000/api/oauth/notion/callback";
 }
 
 export function buildNotionAuthorizeUrl(input: {
   state: string;
-  origin?: string;
+  redirectUri: string;
 }) {
-  const redirectUri = notionRedirectUri(input.origin);
   const params = new URLSearchParams({
     client_id: notionClientId(),
     response_type: "code",
     owner: "user",
-    redirect_uri: redirectUri,
+    redirect_uri: input.redirectUri,
     state: input.state,
   });
   return `${NOTION_AUTH}?${params.toString()}`;
@@ -56,9 +62,8 @@ export type NotionTokenResponse = {
 
 export async function exchangeNotionCode(input: {
   code: string;
-  origin?: string;
+  redirectUri: string;
 }) {
-  const redirectUri = notionRedirectUri(input.origin);
   const basic = Buffer.from(`${notionClientId()}:${notionClientSecret()}`).toString(
     "base64",
   );
@@ -72,7 +77,7 @@ export async function exchangeNotionCode(input: {
     body: JSON.stringify({
       grant_type: "authorization_code",
       code: input.code,
-      redirect_uri: redirectUri,
+      redirect_uri: input.redirectUri,
     }),
     cache: "no-store",
   });

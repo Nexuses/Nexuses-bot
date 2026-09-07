@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import mongoose from "mongoose";
 import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
-import { buildNotionAuthorizeUrl, notionOauthConfigured } from "@/lib/oauth/notion";
+import {
+  buildNotionAuthorizeUrl,
+  notionOauthConfigured,
+  notionRedirectUri,
+} from "@/lib/oauth/notion";
 import { signOauthState } from "@/lib/oauth/state";
 import { getSession } from "@/lib/session";
 import { dbConnect } from "@/lib/db";
@@ -56,14 +60,16 @@ export async function GET(request: NextRequest, { params }: Params) {
     );
   }
 
+  const redirectUri = notionRedirectUri(origin);
   const state = await signOauthState({
     userId: session.userId,
     projectId,
     provider,
+    redirectUri,
   });
 
   if (provider === "notion") {
-    const url = buildNotionAuthorizeUrl({ state, origin });
+    const url = buildNotionAuthorizeUrl({ state, redirectUri });
     return NextResponse.redirect(url);
   }
 

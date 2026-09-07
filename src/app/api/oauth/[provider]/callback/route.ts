@@ -50,7 +50,10 @@ export async function GET(request: NextRequest, { params }: Params) {
   try {
     await dbConnect();
     if (provider === "notion") {
-      const token = await exchangeNotionCode({ code, origin });
+      const token = await exchangeNotionCode({
+        code,
+        redirectUri: state.redirectUri,
+      });
       if (!token.access_token) throw new Error("Notion did not return an access token");
       const workspace = (token.workspace_name || "").trim();
       await upsertIntegrationDoc({

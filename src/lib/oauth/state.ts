@@ -4,6 +4,8 @@ export type OauthState = {
   userId: string;
   projectId: string;
   provider: string;
+  /** Exact redirect_uri used in the authorize request (must match token exchange). */
+  redirectUri: string;
 };
 
 function getSecret() {
@@ -18,6 +20,7 @@ export async function signOauthState(state: OauthState) {
     userId: state.userId,
     projectId: state.projectId,
     provider: state.provider,
+    redirectUri: state.redirectUri,
   })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -32,7 +35,8 @@ export async function verifyOauthState(token: string): Promise<OauthState | null
       payload.typ !== "oauth" ||
       typeof payload.userId !== "string" ||
       typeof payload.projectId !== "string" ||
-      typeof payload.provider !== "string"
+      typeof payload.provider !== "string" ||
+      typeof payload.redirectUri !== "string"
     ) {
       return null;
     }
@@ -40,6 +44,7 @@ export async function verifyOauthState(token: string): Promise<OauthState | null
       userId: payload.userId,
       projectId: payload.projectId,
       provider: payload.provider,
+      redirectUri: payload.redirectUri,
     };
   } catch {
     return null;
