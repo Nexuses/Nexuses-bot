@@ -1,10 +1,22 @@
 "use client";
 
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useState, type ReactNode } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
+
+type Branding = {
+  projectId?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+};
+
+const BrandingContext = createContext<Branding>({});
+
+function useBranding() {
+  return useContext(BrandingContext);
+}
 
 function unwrap(content: string) {
   const trimmed = content.trim();
@@ -175,7 +187,7 @@ function HtmlPreviewModal({
         <iframe
           title="HTML preview"
           sandbox="allow-scripts allow-forms allow-popups"
-          srcDoc={enhanceSharedHtml(html)}
+          srcDoc={html}
           className="h-full w-full flex-1 bg-white"
         />
       </div>
@@ -183,8 +195,20 @@ function HtmlPreviewModal({
   );
 }
 
-function PreviewButton({ html }: { html: string }) {
+function PreviewButton({
+  html,
+  clientLogoUrl,
+  clientName,
+}: {
+  html: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
   const [open, setOpen] = useState(false);
+  const previewHtml = enhanceSharedHtml(html, {
+    clientLogoUrl,
+    clientName,
+  });
   return (
     <>
       <button
@@ -194,12 +218,22 @@ function PreviewButton({ html }: { html: string }) {
       >
         Preview
       </button>
-      <HtmlPreviewModal html={html} open={open} onClose={() => setOpen(false)} />
+      <HtmlPreviewModal html={previewHtml} open={open} onClose={() => setOpen(false)} />
     </>
   );
 }
 
-function ShareLinkButton({ html }: { html: string }) {
+function ShareLinkButton({
+  html,
+  projectId,
+  clientLogoUrl,
+  clientName,
+}: {
+  html: string;
+  projectId?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [url, setUrl] = useState("");
   const [copied, setCopied] = useState(false);
@@ -223,7 +257,12 @@ function ShareLinkButton({ html }: { html: string }) {
       const res = await fetch("/api/shares", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ html }),
+        body: JSON.stringify({
+          html,
+          projectId: projectId || undefined,
+          clientLogoUrl: clientLogoUrl || undefined,
+          clientName: clientName || undefined,
+        }),
       });
       const data = (await res.json().catch(() => null)) as
         | { share?: { url?: string }; error?: string }
@@ -273,10 +312,20 @@ function ShareLinkButton({ html }: { html: string }) {
 }
 
 function HtmlActions({ html }: { html: string }) {
+  const branding = useBranding();
   return (
     <div className="flex items-start gap-2">
-      <PreviewButton html={html} />
-      <ShareLinkButton html={html} />
+      <PreviewButton
+        html={html}
+        clientLogoUrl={branding.clientLogoUrl}
+        clientName={branding.clientName}
+      />
+      <ShareLinkButton
+        html={html}
+        projectId={branding.projectId}
+        clientLogoUrl={branding.clientLogoUrl}
+        clientName={branding.clientName}
+      />
     </div>
   );
 }

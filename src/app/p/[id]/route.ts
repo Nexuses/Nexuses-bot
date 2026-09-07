@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
-import { getHtmlShareByPublicId } from "@/lib/html-shares";
+import { renderHtmlSharePage } from "@/lib/html-shares";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -10,15 +9,12 @@ export async function GET(_request: Request, { params }: Params) {
     return new NextResponse("Not found", { status: 404 });
   }
 
-  const share = await getHtmlShareByPublicId(id);
-  if (!share) {
+  const page = await renderHtmlSharePage(id);
+  if (!page) {
     return new NextResponse("Not found", { status: 404 });
   }
 
-  // Re-enhance older shares that were saved as bare/markdown-ish HTML.
-  const html = enhanceSharedHtml(String(share.html || ""), share.title || "Nexuses dashboard");
-
-  return new NextResponse(html, {
+  return new NextResponse(page.html, {
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",

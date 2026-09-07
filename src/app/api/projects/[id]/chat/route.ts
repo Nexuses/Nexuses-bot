@@ -223,6 +223,7 @@ ${HTML_DASHBOARD_PROMPT}
 - Stay on the product the user is talking about. A Lemlist question is not an Attio import.
 
 Connected APIs: ${connected.length ? connected.join(", ") : "none yet"}.
+Project: ${project.name}. Project logo URL (use as client logo on the right of HTML report headers unless the user gives another): ${project.logo || "none — ask the user for the client logo URL if making a branded dashboard"}.
 ${providerGuide(integrations)}`;
 
   const llmMessages: LlmMessage[] = [
@@ -307,6 +308,8 @@ ${providerGuide(integrations)}`;
                   onStatus: (statusText) => send({ type: "status", text: statusText }),
                   userId: session.userId,
                   projectId: id,
+                  projectName: project.name,
+                  projectLogo: project.logo,
                   origin: new URL(request.url).origin,
                   secretsUsed,
                   onIntegrationsChange: () => publishIntegrations(),

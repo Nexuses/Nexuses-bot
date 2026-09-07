@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { dbConnect } from "@/lib/db";
 import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
 import { HtmlShare } from "@/models/HtmlShare";
+import { Project } from "@/models/Project";
 
 export const MAX_SHARE_HTML_CHARS = 400_000;
 
@@ -37,17 +38,42 @@ export function absoluteShareUrl(origin: string, publicId: string) {
   return `${getAppOrigin(origin)}${publicSharePath(publicId)}`;
 }
 
+async function resolveClientBranding(input: {
+  projectId?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
+  let clientLogoUrl = (input.clientLogoUrl || "").trim();
+  let clientName = (input.clientName || "").trim();
+  if (input.projectId) {
+    await dbConnect();
+    const project = await Project.findById(input.projectId).select("name logo").lean();
+    if (project) {
+      if (!clientLogoUrl) clientLogoUrl = String(project.logo || "").trim();
+      if (!clientName) clientName = String(project.name || "").trim();
+    }
+  }
+  return { clientLogoUrl, clientName };
+}
+
 export async function createHtmlShare(input: {
   userId: string;
   projectId?: string;
   html: string;
   title?: string;
   origin?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
 }) {
   await dbConnect();
   const raw = normalizeSharedHtml(input.html);
   const title = (input.title || "Shared HTML").trim().slice(0, 120) || "Shared HTML";
-  const html = enhanceSharedHtml(raw, title);
+  const branding = await resolveClientBranding(input);
+  const html = enhanceSharedHtml(raw, {
+    titleHint: title,
+    clientLogoUrl: branding.clientLogoUrl,
+    clientName: branding.clientName,
+  });
   const publicId = makePublicId();
 
   await HtmlShare.create({
@@ -68,4 +94,20 @@ export async function createHtmlShare(input: {
 export async function getHtmlShareByPublicId(publicId: string) {
   await dbConnect();
   return HtmlShare.findOne({ publicId }).lean();
+}
+
+export async function renderHtmlSharePage(publicId: string) {
+  const share = await getHtmlShareByPublicId(publicId);
+  if (!share) return null;
+  const branding = await resolveClientBranding({
+    projectId: share.projectId ? String(share.projectId) : undefined,
+  });
+  return {
+    title: share.title || "Nexuses dashboard",
+    html: enhanceSharedHtml(String(share.html || ""), {
+      titleHint: share.title || "Nexuses dashboard",
+      clientLogoUrl: branding.clientLogoUrl,
+      clientName: branding.clientName,
+    }),
+  };
 }

@@ -11,6 +11,8 @@ export async function POST(request: Request) {
     const html = String(body?.html ?? "");
     const title = String(body?.title ?? "").trim();
     const projectId = String(body?.projectId ?? "").trim();
+    const clientLogoUrl = String(body?.clientLogoUrl ?? body?.client_logo ?? "").trim();
+    const clientName = String(body?.clientName ?? body?.client_name ?? "").trim();
     const origin = new URL(request.url).origin;
 
     const share = await createHtmlShare({
@@ -19,6 +21,8 @@ export async function POST(request: Request) {
       html,
       title: title || undefined,
       origin,
+      clientLogoUrl: clientLogoUrl || undefined,
+      clientName: clientName || undefined,
     });
 
     return ok({ share }, 201);

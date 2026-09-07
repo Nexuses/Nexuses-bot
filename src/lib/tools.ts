@@ -751,7 +751,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "share_html",
         description:
-          "Publish HTML to a public share link anyone can open. Use when the user asks for a public link, share link, or to share HTML/email/page with others. Pass the full HTML. Return the URL in your reply.",
+          "Publish HTML to a public share link anyone can open. Header will show Nexuses logo (left) and the project/client logo (right). Pass client_logo if the user provided a custom client logo URL. Return the URL in your reply.",
         parameters: {
           type: "object",
           properties: {
@@ -761,7 +761,16 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
             },
             title: {
               type: "string",
-              description: "Short title for the share, e.g. Event invite",
+              description: "Short title for the share, e.g. Brevo campaign report",
+            },
+            client_logo: {
+              type: "string",
+              description:
+                "Optional client logo URL for the header right side (e.g. SMI). Defaults to the project logo.",
+            },
+            client_name: {
+              type: "string",
+              description: "Optional client/project display name for the header",
             },
           },
           required: ["html"],
@@ -1183,6 +1192,8 @@ export type ToolContext = {
   onStatus?: (text: string) => void;
   userId?: string;
   projectId?: string;
+  projectName?: string;
+  projectLogo?: string;
   origin?: string;
   secretsUsed?: string[];
   onIntegrationsChange?: (integrations: StoredIntegration[]) => void;
@@ -1221,6 +1232,8 @@ export async function runTool(
     if (!context.userId) throw new Error("Cannot create a share link in this context");
     const html = String(args.html || args.content || "").trim();
     const title = String(args.title || "").trim();
+    const clientLogo = String(args.client_logo || args.clientLogo || context.projectLogo || "").trim();
+    const clientName = String(args.client_name || args.clientName || context.projectName || "").trim();
     const origin = context.origin;
     context.onStatus?.("Creating a public link…");
     const share = await createHtmlShare({
@@ -1229,12 +1242,14 @@ export async function runTool(
       html,
       title: title || undefined,
       origin,
+      clientLogoUrl: clientLogo || undefined,
+      clientName: clientName || undefined,
     });
     return clip({
       ok: true,
       title: share.title,
       url: share.url,
-      note: "Share this public URL. Anyone with the link can open the HTML.",
+      note: "Share this public URL. Header shows Nexuses logo (left) and client/project logo (right).",
     });
   }
 

@@ -561,7 +561,12 @@ export function ProjectChat({
                   {message.role === "user" ? (
                     <p className="whitespace-pre-wrap">{message.content}</p>
                   ) : (
-                    <ChatMarkdown content={message.content} />
+                    <ChatMarkdown
+                      content={message.content}
+                      projectId={project._id}
+                      clientLogoUrl={project.logo}
+                      clientName={project.name}
+                    />
                   )}
                   {message.toolsUsed?.length ? (
                     <p className="mt-3 text-xs text-muted">
