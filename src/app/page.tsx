@@ -4,7 +4,6 @@ import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AuthLayout, Field, PrimaryButton } from "@/components/ui";
-import { BrandMark } from "@/components/BrandMark";
 
 export default function UserLoginPage() {
   const router = useRouter();
@@ -39,10 +38,6 @@ export default function UserLoginPage() {
       title="Sign in to your projects."
       subtitle="Use the account your admin created. Once assigned, your projects appear here."
     >
-      <div className="mb-10 flex items-center gap-3 text-sea lg:hidden">
-        <BrandMark />
-        <span className="font-display text-2xl">Nexuses</span>
-      </div>
       <h2 className="font-display text-3xl tracking-tight">Welcome back</h2>
       <p className="mt-2 text-muted">User login</p>
       <form onSubmit={onSubmit} className="mt-8 space-y-4">

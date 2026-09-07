@@ -4,7 +4,6 @@ import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AuthLayout, Field, PrimaryButton } from "@/components/ui";
-import { BrandMark } from "@/components/BrandMark";
 
 export default function AdminLoginPage() {
   const router = useRouter();
@@ -39,10 +38,6 @@ export default function AdminLoginPage() {
       title="Create projects. Assign people."
       subtitle="Sign in to add project logos, invite users, and control who sees what."
     >
-      <div className="mb-10 flex items-center gap-3 text-brass lg:hidden">
-        <BrandMark />
-        <span className="font-display text-2xl">Nexuses</span>
-      </div>
       <h2 className="font-display text-3xl tracking-tight">Admin sign in</h2>
       <p className="mt-2 text-muted">Use your admin account</p>
       <form onSubmit={onSubmit} className="mt-8 space-y-4">
@@ -68,12 +63,6 @@ export default function AdminLoginPage() {
         </PrimaryButton>
       </form>
       <p className="mt-6 text-sm text-muted">
-        Need an admin account?{" "}
-        <Link href="/admin/signup" className="text-brass hover:text-brass-2">
-          Sign up
-        </Link>
-      </p>
-      <p className="mt-2 text-sm text-muted">
         User login lives at{" "}
         <Link href="/" className="text-sea hover:text-sea-2">
           /

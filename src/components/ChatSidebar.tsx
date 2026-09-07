@@ -1,6 +1,6 @@
 "use client";
 
-import { BrandMark } from "@/components/BrandMark";
+import { NexusesLogo } from "@/components/NexusesLogo";
 import type { ChatThreadDTO } from "@/types/chat";
 import type { ProjectDTO, SessionUser } from "@/types";
 
@@ -54,10 +54,7 @@ export function ChatSidebar({
               className="h-12 w-auto max-w-[180px] object-contain"
             />
           ) : (
-            <div className="flex min-w-0 items-center gap-2">
-              <BrandMark className="h-8 w-8 text-sea" />
-              <p className="font-display text-lg tracking-tight">Nexuses</p>
-            </div>
+            <NexusesLogo className="h-8 w-auto max-w-[140px]" />
           )}
           <button
             type="button"

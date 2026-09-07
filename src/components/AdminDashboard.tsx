@@ -2,7 +2,7 @@
 
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { BrandMark } from "@/components/BrandMark";
+import { NexusesLogo } from "@/components/NexusesLogo";
 import { Field, PrimaryButton } from "@/components/ui";
 import type { ProjectDTO, SessionUser, UserDTO } from "@/types";
 
@@ -133,12 +133,9 @@ export function AdminDashboard({
     <div className="min-h-full bg-ink">
       <header className="border-b border-line">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
-          <div className="flex items-center gap-3 text-brass">
-            <BrandMark className="h-8 w-8" />
-            <div>
-              <p className="font-display text-lg tracking-tight text-paper">Nexuses Admin</p>
-              <p className="text-xs text-muted">{admin.email}</p>
-            </div>
+          <div className="flex min-w-0 items-center gap-3">
+            <NexusesLogo className="h-8 w-auto max-w-[160px]" />
+            <p className="truncate text-xs text-muted">{admin.email}</p>
           </div>
           <button
             onClick={logout}

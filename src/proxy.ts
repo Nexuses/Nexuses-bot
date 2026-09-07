@@ -15,7 +15,11 @@ export async function proxy(request: NextRequest) {
     }
   }
 
-  if (pathname === "/admin" || pathname === "/admin/signup") {
+  if (pathname === "/admin/signup") {
+    return NextResponse.redirect(new URL("/admin", request.url));
+  }
+
+  if (pathname === "/admin") {
     if (session?.role === "admin") {
       return NextResponse.redirect(new URL("/admin/dashboard", request.url));
     }

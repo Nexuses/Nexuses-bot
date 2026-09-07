@@ -1,7 +1,7 @@
 "use client";
 
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
-import { BrandMark } from "@/components/BrandMark";
+import { NexusesLogo } from "@/components/NexusesLogo";
 
 export function Field({
   label,
@@ -73,10 +73,7 @@ export function AuthLayout({
           </svg>
         </div>
         <div className="relative z-10 flex min-h-full flex-1 flex-col justify-between p-12">
-          <div className={`flex items-center gap-3 ${accent}`}>
-            <BrandMark />
-              <span className="font-display text-2xl tracking-tight text-paper">Nexuses</span>
-          </div>
+          <NexusesLogo className="h-14 w-auto max-w-[280px]" />
           <div className="max-w-md">
             <p className={`mb-3 text-sm font-medium uppercase tracking-[0.22em] ${accent}`}>
               {eyebrow}
@@ -90,7 +87,12 @@ export function AuthLayout({
         </div>
       </section>
       <section className="flex items-center justify-center px-6 py-16">
-        <div className="w-full max-w-md">{children}</div>
+        <div className="w-full max-w-md">
+          <div className="mb-10 lg:hidden">
+            <NexusesLogo className="h-14 w-auto max-w-[280px]" />
+          </div>
+          {children}
+        </div>
       </section>
     </div>
   );
