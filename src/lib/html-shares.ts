@@ -111,3 +111,85 @@ export async function renderHtmlSharePage(publicId: string) {
     }),
   };
 }
+
+/** Pull the first ```html fenced block from an assistant reply. */
+export function extractHtmlFence(content: string) {
+  const match = content.match(/```(?:html|htm)\s*\n([\s\S]*?)```/i);
+  return match?.[1]?.trim() || "";
+}
+
+export function parseShareUrlFromToolResult(result: string) {
+  try {
+    const data = JSON.parse(result) as { url?: string; ok?: boolean };
+    if (data?.url && /\/p\/[A-Za-z0-9_-]+/.test(data.url)) return String(data.url);
+  } catch {
+    const match = result.match(/https?:\/\/[^\s"'\\]+\/p\/[A-Za-z0-9_-]+/);
+    if (match) return match[0];
+  }
+  return "";
+}
+
+/** Remove invented /p/... links that were never created by share_html. */
+export function scrubInventedShareUrls(content: string, realUrls: string[]) {
+  const allowed = new Set(realUrls.filter(Boolean));
+  return content
+    .replace(/https?:\/\/[^\s)\]>"']+\/p\/[A-Za-z0-9_-]+/g, (url) => {
+      if (allowed.has(url)) return url;
+      const id = url.split("/p/")[1] || "";
+      if ([...allowed].some((real) => real.endsWith(`/p/${id}`))) return url;
+      return "";
+    })
+    .replace(/\[([^\]]*)\]\(\s*\)/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Guarantee dashboard replies include a real working share URL.
+ * The model sometimes invents /p/ links — we scrub those and create a real share when needed.
+ */
+export async function ensureLiveShareInReply(input: {
+  content: string;
+  userText: string;
+  realShareUrls: string[];
+  userId: string;
+  projectId?: string;
+  projectLogo?: string;
+  projectName?: string;
+  origin?: string;
+}) {
+  let content = scrubInventedShareUrls(input.content, input.realShareUrls);
+  const real = [...input.realShareUrls];
+
+  if (real.length) {
+    if (!real.some((url) => content.includes(url))) {
+      content = `${content}\n\n**Live dashboard:** ${real[real.length - 1]}`.trim();
+    }
+    return content;
+  }
+
+  const wantsLive =
+    /dashboard|share|public link|live link|beautiful|html report|shareable/i.test(input.userText) ||
+    /live dashboard|share link|public link/i.test(content);
+  const html = extractHtmlFence(content);
+  if (!wantsLive || !html) return content;
+
+  try {
+    const share = await createHtmlShare({
+      userId: input.userId,
+      projectId: input.projectId,
+      html,
+      title: "Campaign dashboard",
+      origin: input.origin,
+      clientLogoUrl: input.projectLogo,
+      clientName: input.projectName,
+    });
+    content = scrubInventedShareUrls(content, [share.url]);
+    if (!content.includes(share.url)) {
+      content = `${content}\n\n**Live dashboard:** ${share.url}`.trim();
+    }
+  } catch {
+    content = `${content}\n\n_I could not publish a live link automatically — use the Share link button on the HTML preview._`.trim();
+  }
+  return content;
+}

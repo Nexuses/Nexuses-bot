@@ -8,6 +8,10 @@ import {
 import { ensureAutomationRunner } from "@/lib/automations";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
 import { HTML_DASHBOARD_PROMPT } from "@/lib/html-dashboard-kit";
+import {
+  ensureLiveShareInReply,
+  parseShareUrlFromToolResult,
+} from "@/lib/html-shares";
 import { getOwnedChat, serializeChat, titleFromText } from "@/lib/chats";
 import { redactSecrets } from "@/lib/integrations";
 import { complete, type ContentPart, type LlmMessage } from "@/lib/llm";
@@ -212,7 +216,7 @@ Formatting (required):
 - Write the final answer in clean Markdown. Use headings, short paragraphs, and bullet lists.
 - When showing 2 or more items with the same fields, use a Markdown table with a header row.
 - When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons.
-- If the user asks for a public link / share link for HTML, call share_html and give them the URL.
+- For a live / public / shareable dashboard link: you MUST call share_html with the full HTML and paste ONLY the exact url from that tool result. NEVER invent or guess a /p/... URL — fake links 404.
 ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on).
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
@@ -255,6 +259,7 @@ ${providerGuide(integrations)}`;
 
       const toolsUsed: string[] = [];
       const secretsUsed: string[] = [];
+      const shareUrls: string[] = [];
       let nudged = false;
       let activeTools = toolDefinitions(integrations);
 
@@ -317,6 +322,10 @@ ${providerGuide(integrations)}`;
               } catch (err) {
                 result = `Tool error: ${err instanceof Error ? err.message : "failed"}`;
               }
+              if (call.function.name === "share_html") {
+                const url = parseShareUrlFromToolResult(result);
+                if (url) shareUrls.push(url);
+              }
               llmMessages.push({
                 role: "tool",
                 tool_call_id: call.id,
@@ -349,10 +358,19 @@ ${providerGuide(integrations)}`;
           }
 
           send({ type: "status", text: "Writing the reply…" });
-          const content = redactSecrets(
-            (reply.content || "I could not generate a reply.").trim(),
-            secretsUsed,
-          );
+          const content = await ensureLiveShareInReply({
+            content: redactSecrets(
+              (reply.content || "I could not generate a reply.").trim(),
+              secretsUsed,
+            ),
+            userText: `${text} ${displayText}`,
+            realShareUrls: shareUrls,
+            userId: session.userId,
+            projectId: id,
+            projectLogo: project.logo,
+            projectName: project.name,
+            origin: new URL(request.url).origin,
+          });
           const saved = await Message.create({
             userId: session.userId,
             projectId: id,
@@ -393,17 +411,26 @@ ${providerGuide(integrations)}`;
             "Stop calling tools. Answer the user's last question now using only the tool results you already have. If the list is incomplete, show what you have. Stay on that product (Lemlist, Attio, or Brevo). Do not mention Attio unless this was an Attio request. Do not mention IDs. Never repeat API keys.",
         });
         const last = await complete(llmMessages, []);
-        const content = redactSecrets(
-          (
-            last.content ||
-            (toolsUsed.some((name) => name.startsWith("lemlist"))
-              ? "I started pulling that Lemlist list but ran out of steps. Ask me again for the emails who opened, clicked, or replied in that campaign — I will fetch it in one go."
-              : toolsUsed.some((name) => name.startsWith("attio"))
-                ? "I started the Attio work but ran out of steps. Ask me again and I will finish it in one bulk action."
-                : "I started the work but ran out of steps. Ask me once more and I will finish it.")
-          ).trim(),
-          secretsUsed,
-        );
+        const content = await ensureLiveShareInReply({
+          content: redactSecrets(
+            (
+              last.content ||
+              (toolsUsed.some((name) => name.startsWith("lemlist"))
+                ? "I started pulling that Lemlist list but ran out of steps. Ask me again for the emails who opened, clicked, or replied in that campaign — I will fetch it in one go."
+                : toolsUsed.some((name) => name.startsWith("attio"))
+                  ? "I started the Attio work but ran out of steps. Ask me again and I will finish it in one bulk action."
+                  : "I started the work but ran out of steps. Ask me once more and I will finish it.")
+            ).trim(),
+            secretsUsed,
+          ),
+          userText: `${text} ${displayText}`,
+          realShareUrls: shareUrls,
+          userId: session.userId,
+          projectId: id,
+          projectLogo: project.logo,
+          projectName: project.name,
+          origin: new URL(request.url).origin,
+        });
         const saved = await Message.create({
           userId: session.userId,
           projectId: id,
