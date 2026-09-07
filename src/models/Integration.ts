@@ -6,7 +6,7 @@ const IntegrationSchema = new Schema(
     projectId: { type: Schema.Types.ObjectId, ref: "Project", required: true, index: true },
     provider: {
       type: String,
-      enum: ["attio", "brevo", "lemlist", "other"],
+      enum: ["attio", "brevo", "lemlist", "notion", "other"],
       required: true,
     },
     name: { type: String, required: true, trim: true },

@@ -79,6 +79,16 @@ function providerGuide(integrations: StoredIntegration[]) {
 - Keep Attio updated automatically until a campaign completes: call start_campaign_automation with source lemlist, campaign, and attio_list.
 - Other Lemlist work: lemlist_api with /api/ paths.`);
   }
+  if (integrations.some((item) => item.provider === "notion")) {
+    parts.push(`Notion is connected (OAuth).
+- Search pages/databases: notion_search.
+- Create a page under a parent: notion_create_page with parent_page_id + title.
+- Other Notion REST: notion_api with /v1/ paths.
+- Only pages/databases the user shared with the integration are visible.`);
+  } else {
+    parts.push(`Notion is not connected yet.
+- If the user asks to integrate / connect Notion: call start_oauth_connect with provider notion and put the button_markdown link in your reply (Connect Notion button → Notion authorize page).`);
+  }
   if (integrations.some((item) => item.provider === "other")) {
     parts.push(`Custom APIs are connected. Use custom_api_request to finish the user's task against those APIs.`);
   }
@@ -199,13 +209,18 @@ Rules:
 - Never answer with only steps, sample JSON, or "you can do this in Attio/Brevo/Lemlist". Execute it.
 - If a tool errors, fix the payload and retry. Only stop after a real API success or a hard permission error.
 - After tools succeed, tell the user what changed in plain language: names, counts, status, dates. Do not mention IDs.
-- Users can connect tools in chat. If they say connect/integrate Attio, Brevo, Lemlist, or paste an API key, call connect_integration immediately with the provider and key. Do not only send them to the Integrations panel.
+- Users can connect tools in chat.
+  - Attio / Brevo / Lemlist (API key): if they paste a key, call connect_integration immediately. Do not only send them to the Integrations panel.
+  - Notion (OAuth): if they say integrate / connect Notion and did NOT paste a key, call start_oauth_connect with provider notion, then put the exact button_markdown from the tool result in your reply so they get a Connect Notion button that opens Notion's authorize page. After they return, tools work.
 - After a successful connect, continue with their original request using the new tools in the same turn when possible.
 - Never repeat a full API key in your reply. Confirm with the last 4 characters only (key hint).
 - If they ask what is connected, call list_integrations. If they ask to remove one, call disconnect_integration.
 - If the user asks to keep updating / continue updating / auto-update Attio from a running Lemlist or Brevo campaign until it completes: call start_campaign_automation (source, campaign, attio_list). Tell them automatic updates are running and will keep syncing in the background until the campaign ends (or they ask to stop). Use list_automations / stop_automation when they ask about or stop that job.
-- If the needed API is not connected and they did not provide a key, ask them to paste the API key here in chat (or use Integrations).
+- If the needed API is not connected and they did not provide a key:
+  - For Notion: call start_oauth_connect (Connect button).
+  - For others: ask them to paste the API key here in chat (or use Integrations).
 - Never reveal API keys.
+- If the user pastes a documentation or web URL (or asks you to read / open / summarize a link), call fetch_url. Never say you cannot browse the web or that you lack web access.
 
 What the user sees (required):
 - Never show IDs, UUIDs, api slugs, record ids, list ids, campaign ids, attribute ids, or similar internal keys unless the user explicitly asks for an ID.

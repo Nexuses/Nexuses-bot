@@ -24,8 +24,11 @@ import {
   upsertIntegrationDoc,
   maskKey,
 } from "@/lib/integrations";
+import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
+import { notionOauthConfigured, notionRequest } from "@/lib/oauth/notion";
 import { Integration } from "@/models/Integration";
 import { createHtmlShare } from "@/lib/html-shares";
+import { fetchPublicUrl } from "@/lib/fetch-url";
 import type { ToolDef } from "@/lib/llm";
 import type { AuthType, Provider } from "@/types/chat";
 
@@ -684,13 +687,13 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
           name: "connect_integration",
           description:
-            "Connect Attio, Brevo, Lemlist, or a custom API using one API key the user pasted in chat. For Brevo, that single key is the API/MCP key — do not ask for a separate MCP URL. Call this when the user says connect / integrate / add Attio / Brevo / Lemlist, or pastes a key.",
+            "Connect Attio, Brevo, Lemlist, Notion (internal token), or a custom API using one API key the user pasted in chat. For Notion OAuth (Connect button / authorize page), use start_oauth_connect instead. For Brevo, that single key is the API/MCP key — do not ask for a separate MCP URL. Call this when the user pastes a key for Attio / Brevo / Lemlist / Notion internal token.",
         parameters: {
           type: "object",
           properties: {
             provider: {
               type: "string",
-              enum: ["attio", "brevo", "lemlist", "other"],
+              enum: ["attio", "brevo", "lemlist", "notion", "other"],
               description: "Which product to connect",
             },
             api_key: {
@@ -719,6 +722,45 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
     {
       type: "function",
       function: {
+        name: "start_oauth_connect",
+        description:
+          "Start a Grok-style OAuth connector flow. Use when the user says integrate / connect / authorize Notion (or another OAuth app) and they did NOT paste an API key. Returns a connect_url — you MUST put exactly this markdown in your reply so the UI shows a Connect button: [Connect Notion](connect_url). Do not only describe steps.",
+        parameters: {
+          type: "object",
+          properties: {
+            provider: {
+              type: "string",
+              enum: ["notion"],
+              description: "Which OAuth connector to open",
+            },
+          },
+          required: ["provider"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "fetch_url",
+        description:
+          "Fetch a public http(s) web page or docs URL and return readable text. Use when the user pastes a link and asks you to read, summarize, follow, or extract from it. Do NOT say you cannot browse the web — call this tool. Only public URLs; private/local addresses are blocked.",
+        parameters: {
+          type: "object",
+          properties: {
+            url: {
+              type: "string",
+              description: "Full http:// or https:// URL to fetch",
+            },
+          },
+          required: ["url"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "list_integrations",
         description: "List which APIs are already connected for this project. Does not reveal full API keys.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
@@ -728,18 +770,19 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       type: "function",
       function: {
         name: "disconnect_integration",
-        description: "Disconnect a saved integration by provider name (attio, brevo, lemlist) or custom API name.",
+        description:
+          "Disconnect a saved integration by provider name (attio, brevo, lemlist, notion) or custom API name.",
         parameters: {
           type: "object",
           properties: {
             provider: {
               type: "string",
-              enum: ["attio", "brevo", "lemlist", "other"],
+              enum: ["attio", "brevo", "lemlist", "notion", "other"],
               description: "Provider to disconnect",
             },
             name: {
               type: "string",
-              description: "Custom API name, or Attio/Brevo/Lemlist",
+              description: "Custom API name, or Attio/Brevo/Lemlist/Notion",
             },
           },
           additionalProperties: false,
@@ -1150,6 +1193,60 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
     );
   }
 
+  if (findByProvider(integrations, "notion")) {
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "notion_search",
+          description:
+            "Search Notion pages and databases the user shared with this connection. Use for find / search / list Notion content.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search text. Empty lists recent shared pages." },
+              limit: { type: "number", description: "Max results, default 20" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "notion_create_page",
+          description:
+            "Create a Notion page under a parent page. Pass parent page id (from notion_search) and title. Optional plain-text body.",
+          parameters: {
+            type: "object",
+            properties: {
+              parent_page_id: {
+                type: "string",
+                description: "Parent page id from notion_search",
+              },
+              title: { type: "string", description: "Page title" },
+              content: {
+                type: "string",
+                description: "Optional plain text to put as the first paragraph",
+              },
+            },
+            required: ["parent_page_id", "title"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "notion_api",
+          description:
+            "Call any Notion REST API path (e.g. /v1/users/me, /v1/blocks/{id}/children). Use when notion_search / notion_create_page are not enough.",
+          parameters: httpToolParams(),
+        },
+      },
+    );
+  }
+
   const custom = integrations.filter((item) => item.provider === "other");
   if (custom.length) {
     tools.push({
@@ -1226,6 +1323,41 @@ export async function runTool(
       })),
       count: integrations.length,
     });
+  }
+
+  if (name === "start_oauth_connect") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot start OAuth in this context");
+    }
+    const provider = String(args.provider || "").trim().toLowerCase();
+    if (!isOauthProvider(provider)) {
+      throw new Error('Supported OAuth connectors right now: "notion"');
+    }
+    const connector = getOauthConnector(provider);
+    if (provider === "notion" && !notionOauthConfigured()) {
+      throw new Error(
+        "Notion OAuth is not configured on the server. Add NOTION_CLIENT_ID and NOTION_CLIENT_SECRET, and set the redirect URI to {APP_URL}/api/oauth/notion/callback in the Notion public integration.",
+      );
+    }
+    const connectUrl = `/api/oauth/${provider}/start?projectId=${encodeURIComponent(context.projectId)}`;
+    const label = connector?.title || "Connect";
+    const markdown = `[Connect ${label}](${connectUrl})`;
+    context.onStatus?.(`Preparing ${label} authorization…`);
+    return clip({
+      ok: true,
+      provider,
+      connect_url: connectUrl,
+      button_markdown: markdown,
+      note: `Put this exact markdown in your reply so the user gets a Connect button: ${markdown}. After they authorize and return, Notion tools become available — then continue their request.`,
+    });
+  }
+
+  if (name === "fetch_url") {
+    const url = String(args.url || args.link || "").trim();
+    if (!url) throw new Error("url is required");
+    context.onStatus?.("Reading the page…");
+    const result = await fetchPublicUrl(url);
+    return clip(result, 42000);
   }
 
   if (name === "share_html") {
@@ -1785,6 +1917,98 @@ export async function runTool(
     return clip(data);
   }
 
+  if (name === "notion_search") {
+    const notion = findByProvider(integrations, "notion");
+    if (!notion) throw new Error("Connect Notion first (use the Connect Notion button)");
+    context.onStatus?.("Searching Notion…");
+    const query = String(args.query || "").trim();
+    const pageSize = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
+    const data = (await notionRequest(notion.apiKey, "POST", "/v1/search", {
+      query: query || undefined,
+      page_size: pageSize,
+    })) as {
+      results?: Array<{
+        id?: string;
+        object?: string;
+        url?: string;
+        properties?: Record<string, unknown>;
+        title?: Array<{ plain_text?: string }>;
+      }>;
+    };
+    const results = (data.results || []).map((item) => {
+      const titleProp = item.properties?.title as
+        | { title?: Array<{ plain_text?: string }> }
+        | undefined;
+      const nameProp = item.properties?.Name as
+        | { title?: Array<{ plain_text?: string }> }
+        | undefined;
+      const title =
+        titleProp?.title?.map((t) => t.plain_text || "").join("") ||
+        nameProp?.title?.map((t) => t.plain_text || "").join("") ||
+        item.title?.map((t) => t.plain_text || "").join("") ||
+        "(untitled)";
+      return {
+        id: item.id,
+        type: item.object,
+        title: title || "(untitled)",
+        url: item.url,
+      };
+    });
+    return clip({ count: results.length, results });
+  }
+
+  if (name === "notion_create_page") {
+    const notion = findByProvider(integrations, "notion");
+    if (!notion) throw new Error("Connect Notion first (use the Connect Notion button)");
+    const parentId = String(args.parent_page_id || args.parentPageId || "").trim();
+    const title = String(args.title || "").trim();
+    if (!parentId) throw new Error("parent_page_id is required");
+    if (!title) throw new Error("title is required");
+    const content = String(args.content || "").trim();
+    context.onStatus?.("Creating a Notion page…");
+    const children = content
+      ? [
+          {
+            object: "block",
+            type: "paragraph",
+            paragraph: {
+              rich_text: [{ type: "text", text: { content: content.slice(0, 1900) } }],
+            },
+          },
+        ]
+      : undefined;
+    const data = await notionRequest(notion.apiKey, "POST", "/v1/pages", {
+      parent: { page_id: parentId },
+      properties: {
+        title: {
+          title: [{ type: "text", text: { content: title.slice(0, 200) } }],
+        },
+      },
+      ...(children ? { children } : {}),
+    });
+    return clip({
+      ok: true,
+      id: (data as { id?: string }).id,
+      url: (data as { url?: string }).url,
+      title,
+    });
+  }
+
+  if (name === "notion_api") {
+    const notion = findByProvider(integrations, "notion");
+    if (!notion) throw new Error("Connect Notion first (use the Connect Notion button)");
+    const path = String(args.path || "");
+    if (!path) throw new Error("path is required");
+    context.onStatus?.("Calling Notion…");
+    const data = await notionRequest(
+      notion.apiKey,
+      method,
+      path,
+      args.body === undefined ? undefined : args.body,
+    );
+    return clip(data);
+  }
+
   throw new Error(`Unknown tool ${name}`);
 }
 
@@ -1815,6 +2039,10 @@ export async function validateIntegration(input: {
     await requestJson(`${LEMLIST}/api/campaigns?limit=1&offset=0`, {
       headers: lemlistHeaders(input.apiKey),
     });
+    return {};
+  }
+  if (input.provider === "notion") {
+    await notionRequest(input.apiKey, "GET", "/v1/users/me");
     return {};
   }
   if (input.baseUrl) {

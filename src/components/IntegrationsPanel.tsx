@@ -4,7 +4,12 @@ import { useMemo, useState, type FormEvent } from "react";
 import { Field, PrimaryButton } from "@/components/ui";
 import type { IntegrationDTO, Provider } from "@/types/chat";
 
-const CATALOG: { provider: Exclude<Provider, "other">; title: string; blurb: string }[] = [
+const CATALOG: {
+  provider: Exclude<Provider, "other">;
+  title: string;
+  blurb: string;
+  oauth?: boolean;
+}[] = [
   { provider: "attio", title: "Attio", blurb: "Lists, stages, people, and companies" },
   {
     provider: "brevo",
@@ -13,6 +18,12 @@ const CATALOG: { provider: Exclude<Provider, "other">; title: string; blurb: str
       "MCP key for campaigns; add a normal API key too for who opened/clicked (same connection)",
   },
   { provider: "lemlist", title: "Lemlist", blurb: "Outreach campaigns, leads, activity" },
+  {
+    provider: "notion",
+    title: "Notion",
+    blurb: "Pages and databases — Connect opens Notion’s authorize page",
+    oauth: true,
+  },
 ];
 
 export function IntegrationsPanel({
@@ -164,6 +175,19 @@ export function IntegrationsPanel({
                   ) : null}
                 </div>
                 {!connected ? (
+                  item.oauth ? (
+                    <div className="mt-3">
+                      <a
+                        href={`/api/oauth/${item.provider}/start?projectId=${encodeURIComponent(projectId)}`}
+                        className="inline-flex items-center justify-center rounded-full bg-sea px-5 py-2.5 text-sm font-semibold text-ink hover:bg-sea-2"
+                      >
+                        Connect {item.title}
+                      </a>
+                      <p className="mt-2 text-xs text-muted">
+                        Opens {item.title}’s authorize page, then returns here.
+                      </p>
+                    </div>
+                  ) : (
                   <form
                     className="mt-3 space-y-3"
                     onSubmit={(event) => {
@@ -184,6 +208,7 @@ export function IntegrationsPanel({
                       {busy === item.provider ? "Connecting..." : `Connect ${item.title}`}
                     </PrimaryButton>
                   </form>
+                  )
                 ) : item.provider === "brevo" && connected.mcpUrl && !connected.hasRestApiKey ? (
                   <form
                     className="mt-3 space-y-3"

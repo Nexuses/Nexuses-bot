@@ -375,16 +375,30 @@ const components: Components = {
   li: ({ children }) => <li className="leading-7 text-paper [&>p]:mb-0">{children}</li>,
   strong: ({ children }) => <strong className="font-semibold text-paper">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="text-sea underline decoration-sea/40 underline-offset-2 hover:text-sea-2"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => {
+    const url = href || "";
+    const isOauthConnect = /\/api\/oauth\/[^/]+\/start\b/i.test(url);
+    if (isOauthConnect) {
+      return (
+        <a
+          href={url}
+          className="my-2 inline-flex items-center justify-center rounded-full bg-sea px-5 py-2.5 text-sm font-semibold text-ink no-underline shadow-sm transition hover:bg-sea-2"
+        >
+          {children}
+        </a>
+      );
+    }
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="text-sea underline decoration-sea/40 underline-offset-2 hover:text-sea-2"
+      >
+        {children}
+      </a>
+    );
+  },
   blockquote: ({ children }) => (
     <blockquote className="my-3 border-l-2 border-sea/50 pl-4 text-muted">{children}</blockquote>
   ),

@@ -11,7 +11,7 @@ import { validateIntegration } from "@/lib/tools";
 import { Integration } from "@/models/Integration";
 import type { Provider } from "@/types/chat";
 
-const PROVIDERS = new Set<Provider>(["attio", "brevo", "lemlist", "other"]);
+const PROVIDERS = new Set<Provider>(["attio", "brevo", "lemlist", "notion", "other"]);
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -44,7 +44,12 @@ export async function POST(request: Request, { params }: Params) {
         ? String(body.name ?? "").trim()
         : displayProviderName(provider);
 
-    if (!PROVIDERS.has(provider)) return jsonError("Choose Attio, Brevo, Lemlist, or Other");
+    if (!PROVIDERS.has(provider)) return jsonError("Choose Attio, Brevo, Lemlist, Notion, or Other");
+    if (provider === "notion") {
+      return jsonError(
+        "Connect Notion with the Connect Notion button (OAuth). Or paste an internal integration token in chat.",
+      );
+    }
     if (!apiKey) return jsonError("API key is required");
     if (provider === "other" && name.length < 2) return jsonError("Give this API a name");
 

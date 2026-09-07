@@ -148,8 +148,37 @@ export function ProjectChat({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [automations, setAutomations] = useState<AutomationDTO[]>([]);
   const [stoppingId, setStoppingId] = useState("");
+  const [oauthNotice, setOauthNotice] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    const oauthError = params.get("oauth_error");
+    if (!connected && !oauthError) return;
+
+    if (connected) {
+      setOauthNotice(
+        connected === "notion"
+          ? "Notion connected. You can use it in chat now."
+          : `${connected} connected.`,
+      );
+      void fetch(`/api/projects/${project._id}/integrations`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (Array.isArray(data.integrations)) setIntegrations(data.integrations);
+        })
+        .catch(() => {});
+    }
+    if (oauthError) setError(oauthError);
+
+    params.delete("connected");
+    params.delete("oauth_error");
+    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}`;
+    window.history.replaceState({}, "", next);
+  }, [project._id]);
 
   async function refreshAutomations() {
     try {
@@ -583,6 +612,11 @@ export function ProjectChat({
               />
               <p>{status || "Nexuses is working…"}</p>
             </div>
+          ) : null}
+          {oauthNotice ? (
+            <p className="rounded-xl border border-sea/30 bg-sea/10 px-3 py-2 text-sm text-sea">
+              {oauthNotice}
+            </p>
           ) : null}
           {error ? <p className="text-sm text-red-500">{error}</p> : null}
           </div>

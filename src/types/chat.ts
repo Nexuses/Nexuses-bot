@@ -1,4 +1,4 @@
-export type Provider = "attio" | "brevo" | "lemlist" | "other";
+export type Provider = "attio" | "brevo" | "lemlist" | "notion" | "other";
 export type AuthType = "bearer" | "api-key" | "basic";
 
 export type IntegrationDTO = {

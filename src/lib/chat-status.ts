@@ -14,7 +14,10 @@ export function openingStatus(message: string, fileNames: string[]) {
     return "Starting automatic updates…";
   }
   if (/create.*list|list.*stage/i.test(message)) return "Getting ready to set up the list…";
-  if (/connect|integrat|api key|apikey/i.test(message)) {
+  if (/https?:\/\/|read (this |the )?(page|link|url|docs)|summarize .{0,40}(url|link|page)/i.test(message)) {
+    return "Reading the page…";
+  }
+  if (/connect|integrat|api key|apikey|notion/i.test(message)) {
     return "Setting up the connection…";
   }
   if (/attio/i.test(message)) return "Working with Attio…";
@@ -32,6 +35,8 @@ export function openingStatus(message: string, fileNames: string[]) {
 export function statusForTool(name: string) {
   const labels: Record<string, string> = {
     connect_integration: "Connecting the API…",
+    start_oauth_connect: "Opening the authorize link…",
+    fetch_url: "Reading the page…",
     list_integrations: "Checking connected apps…",
     disconnect_integration: "Disconnecting the API…",
     share_html: "Creating a public link…",
@@ -56,6 +61,9 @@ export function statusForTool(name: string) {
     lemlist_list_leads: "Loading Lemlist leads…",
     lemlist_list_activities: "Loading Lemlist activity…",
     lemlist_api: "Talking to Lemlist…",
+    notion_search: "Searching Notion…",
+    notion_create_page: "Creating a Notion page…",
+    notion_api: "Talking to Notion…",
     custom_api_request: "Calling the connected API…",
   };
   return labels[name] || "Working on the next step…";

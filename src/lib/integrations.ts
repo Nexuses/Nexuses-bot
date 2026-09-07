@@ -16,15 +16,16 @@ export type StoredIntegrationInput = {
   restOnly?: boolean;
 };
 
-const PROVIDERS = new Set<Provider>(["attio", "brevo", "lemlist", "other"]);
+const PROVIDERS = new Set<Provider>(["attio", "brevo", "lemlist", "notion", "other"]);
 
 export function normalizeProvider(raw: string): Provider {
   const value = raw.trim().toLowerCase();
   if (value === "attio") return "attio";
   if (value === "brevo" || value === "sendinblue") return "brevo";
   if (value === "lemlist" || value === "lem list") return "lemlist";
+  if (value === "notion") return "notion";
   if (value === "other" || value === "custom" || value === "api") return "other";
-  throw new Error('Provider must be "attio", "brevo", "lemlist", or "other"');
+  throw new Error('Provider must be "attio", "brevo", "lemlist", "notion", or "other"');
 }
 
 export function displayProviderName(provider: Provider, name?: string) {
@@ -57,7 +58,7 @@ export async function upsertIntegrationDoc(
   input: StoredIntegrationInput,
 ): Promise<IntegrationDTO & { apiKey: string; restApiKey: string }> {
   if (!PROVIDERS.has(input.provider)) {
-    throw new Error("Choose Attio, Brevo, Lemlist, or Other");
+    throw new Error("Choose Attio, Brevo, Lemlist, Notion, or Other");
   }
   const apiKey = input.apiKey.trim();
   if (!apiKey) throw new Error("API key is required");
@@ -123,7 +124,7 @@ export async function removeIntegrationDoc(input: {
     filter.name = new RegExp(`^${input.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
   } else {
     throw new Error(
-      "Say which integration to disconnect (Attio, Brevo, Lemlist, or the custom name)",
+      "Say which integration to disconnect (Attio, Brevo, Lemlist, Notion, or the custom name)",
     );
   }
 
