@@ -17,6 +17,8 @@ import {
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import {
   displayProviderName,
+  looksLikeQueryApiKeyAuth,
+  normalizeCustomBaseUrl,
   normalizeMcpUrl,
   normalizeProvider,
   parseAuthType,
@@ -89,6 +91,12 @@ function lemlistHeaders(apiKey: string) {
 }
 
 function otherHeaders(integration: StoredIntegration): Record<string, string> {
+  if (looksLikeQueryApiKeyAuth(integration)) {
+    return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+  }
   const auth = integration.authType ?? "bearer";
   if (auth === "api-key") {
     return { "api-key": integration.apiKey, "Content-Type": "application/json" };
@@ -103,6 +111,14 @@ function otherHeaders(integration: StoredIntegration): Record<string, string> {
     Authorization: `Bearer ${integration.apiKey}`,
     "Content-Type": "application/json",
   };
+}
+
+function withQueryApiKey(url: string, apiKey: string) {
+  const parsed = new URL(url);
+  if (!parsed.searchParams.get("api_key")) {
+    parsed.searchParams.set("api_key", apiKey);
+  }
+  return parsed.toString();
 }
 
 function findByProvider(integrations: StoredIntegration[], provider: Provider) {
@@ -710,8 +726,9 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
             },
             auth_type: {
               type: "string",
-              enum: ["bearer", "api-key", "basic"],
-              description: "Auth style for custom APIs. Default bearer.",
+              enum: ["bearer", "api-key", "basic", "query"],
+              description:
+                "Auth style for custom APIs. Default bearer. Use query for SmartLead (?api_key=). SmartLead is auto-detected from the name/base URL.",
             },
           },
           required: ["provider", "api_key"],
@@ -1253,7 +1270,14 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       type: "function",
       function: {
         name: "custom_api_request",
-        description: `Call a connected custom API and complete the user's task. Available: ${custom.map((item) => item.name).join(", ")}. Use the integration name, HTTP method, and a path or full URL.`,
+        description: `Call a connected custom API and complete the user's task. Available: ${custom
+          .map((item) => {
+            const mode = looksLikeQueryApiKeyAuth(item)
+              ? "auth=query api_key"
+              : `auth=${item.authType || "bearer"}`;
+            return `${item.name} (${mode}${item.baseUrl ? `, base ${item.baseUrl}` : ""})`;
+          })
+          .join("; ")}. For SmartLead use paths under /campaigns etc. — the server attaches ?api_key= automatically. Do not put the API key in the path.`,
         parameters: {
           type: "object",
           properties: {
@@ -1267,7 +1291,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
             },
             path: {
               type: "string",
-              description: "Path like /v1/items or a full https URL",
+              description: "Path like /campaigns or /v1/items or a full https URL (without api_key)",
             },
             body: {
               type: "string",
@@ -1446,9 +1470,16 @@ export async function runTool(
     const provider = normalizeProvider(String(args.provider || ""));
     const apiKey = String(args.api_key || args.apiKey || "").trim();
     if (!apiKey) throw new Error("API key is required");
-    const authType = parseAuthType(args.auth_type || args.authType);
-    const baseUrl = String(args.base_url || args.baseUrl || "").trim();
+    let authType = parseAuthType(args.auth_type || args.authType);
     const label = displayProviderName(provider, String(args.name || ""));
+    let baseUrl =
+      provider === "other"
+        ? normalizeCustomBaseUrl(label, String(args.base_url || args.baseUrl || ""))
+        : String(args.base_url || args.baseUrl || "").trim();
+    if (provider === "other" && looksLikeQueryApiKeyAuth({ name: label, baseUrl, authType })) {
+      authType = "query";
+      if (!baseUrl) baseUrl = "https://server.smartlead.ai/api/v1";
+    }
     context.onStatus?.(`Connecting ${label} and checking the API key…`);
     const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
 
@@ -1903,12 +1934,17 @@ export async function runTool(
       throw new Error(`No custom API named "${args.integration}"`);
     }
     const path = String(args.path || "");
-    const url = path.startsWith("http")
+    let url = path.startsWith("http")
       ? path
       : `${(integration.baseUrl || "").replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
     if (!url.startsWith("http")) {
       throw new Error("Provide a full URL or set a base URL on this integration");
     }
+    if (looksLikeQueryApiKeyAuth(integration)) {
+      url = withQueryApiKey(url, integration.apiKey);
+    }
+    context.secretsUsed?.push(integration.apiKey);
+    context.onStatus?.(`Calling ${integration.name}…`);
     const init: RequestInit = { method, headers: otherHeaders(integration) };
     if (args.body && method !== "GET") {
       init.body = encodeBody(args.body);

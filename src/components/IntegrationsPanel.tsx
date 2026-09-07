@@ -265,7 +265,8 @@ export function IntegrationsPanel({
               <div>
                 <p className="font-medium">Other</p>
                 <p className="text-sm text-muted">
-                  Any custom API. Give it a name, key, and optional base URL.
+                  Custom API (e.g. SmartLead). Name it SmartLead and paste the key — we use
+                  ?api_key= auth automatically.
                 </p>
               </div>
               {!addingOther ? (
@@ -297,7 +298,7 @@ export function IntegrationsPanel({
                   label="Name"
                   value={otherName}
                   onChange={(event) => setOtherName(event.target.value)}
-                  placeholder="HubSpot"
+                  placeholder="SmartLead"
                   required
                   minLength={2}
                 />
@@ -313,8 +314,12 @@ export function IntegrationsPanel({
                   type="url"
                   value={otherUrl}
                   onChange={(event) => setOtherUrl(event.target.value)}
-                  placeholder="https://api.example.com"
+                  placeholder="https://server.smartlead.ai/api/v1"
                 />
+                <p className="text-xs text-muted">
+                  For SmartLead, leave base URL empty or use https://server.smartlead.ai/api/v1.
+                  Auth is ?api_key= (not Bearer).
+                </p>
                 <PrimaryButton type="submit" tone="sea" disabled={busy === "other" + otherName}>
                   {busy.startsWith("other") ? "Connecting..." : `Connect ${otherName.trim() || "API"}`}
                 </PrimaryButton>

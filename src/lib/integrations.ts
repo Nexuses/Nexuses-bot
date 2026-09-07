@@ -34,7 +34,26 @@ export function displayProviderName(provider: Provider, name?: string) {
 }
 
 export function parseAuthType(raw: unknown): AuthType {
-  return raw === "api-key" || raw === "basic" ? raw : "bearer";
+  if (raw === "api-key" || raw === "basic" || raw === "query") return raw;
+  return "bearer";
+}
+
+/** SmartLead (and similar) expect ?api_key= on the URL, not Bearer headers. */
+export function looksLikeQueryApiKeyAuth(input: {
+  name?: string;
+  baseUrl?: string;
+  authType?: AuthType;
+}) {
+  if (input.authType === "query") return true;
+  const hay = `${input.name || ""} ${input.baseUrl || ""}`.toLowerCase();
+  return /smartlead/.test(hay);
+}
+
+export function normalizeCustomBaseUrl(name: string, baseUrl: string) {
+  const trimmed = baseUrl.trim().replace(/\/$/, "");
+  if (trimmed) return trimmed;
+  if (/smartlead/i.test(name)) return "https://server.smartlead.ai/api/v1";
+  return "";
 }
 
 export function normalizeMcpUrl(raw: string) {

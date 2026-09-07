@@ -90,7 +90,8 @@ function providerGuide(integrations: StoredIntegration[]) {
 - If the user asks to integrate / connect Notion: call start_oauth_connect with provider notion and put the button_markdown link in your reply (Connect Notion button → Notion authorize page).`);
   }
   if (integrations.some((item) => item.provider === "other")) {
-    parts.push(`Custom APIs are connected. Use custom_api_request to finish the user's task against those APIs.`);
+    parts.push(`Custom APIs are connected. Use custom_api_request to finish the user's task against those APIs.
+- SmartLead (name/base contains smartlead): the server adds ?api_key= automatically. Call paths like /campaigns or /campaigns/{id}/analytics. Base URL should be https://server.smartlead.ai/api/v1. Never put the API key in the path yourself.`);
   }
   return parts.join("\n");
 }

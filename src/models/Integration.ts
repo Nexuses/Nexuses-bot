@@ -17,7 +17,7 @@ const IntegrationSchema = new Schema(
     mcpUrl: { type: String, trim: true, default: "" },
     authType: {
       type: String,
-      enum: ["bearer", "api-key", "basic"],
+      enum: ["bearer", "api-key", "basic", "query"],
       default: "bearer",
     },
   },

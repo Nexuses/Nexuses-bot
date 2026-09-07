@@ -1,6 +1,8 @@
 import { jsonError } from "@/lib/api";
 import {
   displayProviderName,
+  looksLikeQueryApiKeyAuth,
+  normalizeCustomBaseUrl,
   normalizeMcpUrl,
   parseAuthType,
   upsertIntegrationDoc,
@@ -37,12 +39,20 @@ export async function POST(request: Request, { params }: Params) {
     const body = await request.json();
     const provider = String(body.provider ?? "") as Provider;
     const apiKey = String(body.apiKey ?? "").trim();
-    const baseUrl = String(body.baseUrl ?? "").trim().replace(/\/$/, "");
-    const authType = parseAuthType(body.authType);
+    let authType = parseAuthType(body.authType);
     const name =
       provider === "other"
         ? String(body.name ?? "").trim()
         : displayProviderName(provider);
+    let baseUrl =
+      provider === "other"
+        ? normalizeCustomBaseUrl(name, String(body.baseUrl ?? ""))
+        : String(body.baseUrl ?? "").trim().replace(/\/$/, "");
+
+    if (provider === "other" && looksLikeQueryApiKeyAuth({ name, baseUrl, authType })) {
+      authType = "query";
+      if (!baseUrl) baseUrl = "https://server.smartlead.ai/api/v1";
+    }
 
     if (!PROVIDERS.has(provider)) return jsonError("Choose Attio, Brevo, Lemlist, Notion, or Other");
     if (provider === "notion") {
