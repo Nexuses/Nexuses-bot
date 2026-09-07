@@ -54,7 +54,7 @@ const KIT_HEAD = `
   th, td { text-align: left; padding: 0.85rem 1rem; border-bottom: 1px solid #ddd6cb; vertical-align: top; }
   th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: #6b6560; font-weight: 600; }
   tbody tr:hover { background: rgba(30,138,122,0.04); }
-  .nx-shell { max-width: 1120px; margin: 0 auto; padding: 1.75rem 1.25rem 4rem; }
+  .nx-shell { max-width: 1080px; margin: 0 auto; padding: 2rem max(1.5rem, 5vw) 4rem; box-sizing: border-box; }
   .nx-card { background: rgba(255,255,255,0.72); border: 1px solid #ddd6cb; border-radius: 1.5rem; box-shadow: 0 18px 50px rgba(28,25,22,0.08); backdrop-filter: blur(8px); }
   .nx-stat { padding: 1.25rem 1.35rem; }
   .nx-stat .label { font-size: 0.75rem; color: #6b6560; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -173,7 +173,7 @@ function looksStyled(html: string) {
   );
 }
 
-function stripDuplicateBrandChrome(body: string) {
+function stripDuplicateBrandChrome(body: string, options?: ShareEnhanceOptions) {
   let next = body;
   // Our previous injected header.
   next = next.replace(new RegExp(`<header[^>]*${HEADER_MARK}[^>]*>[\\s\\S]*?<\\/header>`, "i"), "");
@@ -183,36 +183,94 @@ function stripDuplicateBrandChrome(body: string) {
     /<(p|div|span)[^>]*>\s*(?:<[^>]+>\s*)*NEXUSES\s*(?:<\/[^>]+>\s*)*<\/\1>/gi,
     "",
   );
-  // Bot-made logo bars that stack Nexuses + client logos before the title.
-  next = next.replace(
-    /<(header|div)[^>]*(?:logo|brand|header)[^>]*>[\s\S]*?(?=<h1\b)/i,
-    "",
-  );
-  // Leading images of the Nexuses CDN logo outside our header.
-  next = next.replace(
-    /(?:<(?:a|div|p)[^>]*>\s*)*<img[^>]*Nexuses-full-logo[^>]*>\s*(?:<\/(?:a|div|p)>\s*)*/gi,
-    "",
-  );
+
+  // Anything before the first H1 that looks like a logo bar (flex/justify-between with images).
+  const h1Index = next.search(/<h1\b/i);
+  if (h1Index > 0) {
+    let before = next.slice(0, h1Index);
+    const after = next.slice(h1Index);
+
+    // Drop bot-made header/nav/logo rows.
+    before = before.replace(
+      /<(header|nav|div|section)[^>]*>[\s\S]*?<\/\1>/gi,
+      (block) => {
+        const imgs = (block.match(/<img\b/gi) || []).length;
+        const looksLogoRow =
+          imgs >= 1 &&
+          (/logo|brand|header|flex|justify-between|items-center/i.test(block) ||
+            /Nexuses-full-logo|nexuses\.com|cdn-nexlink/i.test(block) ||
+            (options?.clientLogoUrl && block.includes(options.clientLogoUrl)) ||
+            (options?.clientName &&
+              new RegExp(options.clientName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(
+                block,
+              )));
+        return looksLogoRow ? "" : block;
+      },
+    );
+
+    // Standalone Nexuses / client logos sitting above the title.
+    before = before.replace(
+      /(?:<(?:a|div|p|span)[^>]*>\s*)*<img[^>]*>\s*(?:<\/(?:a|div|p|span)>\s*)*/gi,
+      (block) => {
+        if (/Nexuses-full-logo|cdn-nexlink|nexuses/i.test(block)) return "";
+        if (options?.clientLogoUrl && block.includes(options.clientLogoUrl)) return "";
+        if (
+          options?.clientName &&
+          new RegExp(options.clientName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(block)
+        ) {
+          return "";
+        }
+        // Generic logo-looking image right above the title.
+        if (/logo|brand/i.test(block)) return "";
+        return block;
+      },
+    );
+
+    // Duplicate client name text (e.g. "Smiforce") above the title.
+    if (options?.clientName) {
+      const name = options.clientName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      before = before.replace(
+        new RegExp(
+          `<(p|div|span|h2|h3)[^>]*>\\s*(?:<[^>]+>\\s*)*${name}\\s*(?:<\\/[^>]+>\\s*)*<\\/\\1>`,
+          "gi",
+        ),
+        "",
+      );
+    }
+
+    next = `${before}${after}`;
+  }
+
   return next.trim();
 }
 
 function replaceOrInjectHeader(body: string, options?: ShareEnhanceOptions) {
-  const cleaned = stripDuplicateBrandChrome(body);
+  const cleaned = stripDuplicateBrandChrome(body, options);
   return `${buildReportHeader(options)}\n${cleaned}`;
 }
 
 function ensureKitInHead(doc: string) {
-  if (doc.includes("data-nexuses-kit-css")) return doc;
   const cssBlock = `<style data-nexuses-kit-css>
+  body { box-sizing: border-box; }
+  .nx-shell, main, .max-w-5xl, .max-w-6xl, .max-w-7xl {
+    max-width: 1080px !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding-left: max(1.5rem, 5vw) !important;
+    padding-right: max(1.5rem, 5vw) !important;
+    box-sizing: border-box !important;
+  }
   .nx-header { display:flex !important; align-items:center !important; justify-content:space-between !important; gap:1rem; width:100%; margin:0 0 1.75rem; padding:0 0 1.25rem; border-bottom:1px solid #ddd6cb; box-sizing:border-box; }
   .nx-header img { display:block; height:40px; width:auto; max-width:180px; object-fit:contain; }
   .nx-header .nx-client-logo { height:44px; max-width:160px; }
   h1, h2, h3, .font-display { font-family: "Outfit", ui-sans-serif, system-ui, sans-serif !important; letter-spacing: -0.02em; font-weight: 700; }
 </style>`;
-  if (/<\/head>/i.test(doc)) {
-    return doc.replace(/<\/head>/i, `${cssBlock}\n</head>`);
+  // Always refresh kit CSS so older shares pick up margin + header fixes.
+  let next = doc.replace(/<style[^>]*data-nexuses-kit-css[^>]*>[\s\S]*?<\/style>/gi, "");
+  if (/<\/head>/i.test(next)) {
+    return next.replace(/<\/head>/i, `${cssBlock}\n</head>`);
   }
-  return doc;
+  return next;
 }
 
 /**
@@ -273,11 +331,9 @@ export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / 
 - Use Tailwind via CDN (cdn.tailwindcss.com) plus Chart.js (cdn.jsdelivr.net/npm/chart.js) when charts help.
 - Fonts: Outfit for headings (NOT Syne / ultra-wide fonts), DM Sans for body (Google Fonts).
 - Palette: background #f6f3ee, text #1c1916, accent #1e8a7a, borders #ddd6cb. Avoid purple gradients, neon glow, and emoji decoration.
-- Header (required): left = Nexuses logo image exactly at
-  ${NEXUSES_LOGO_URL}
-  right = the project/client logo (use the project's logo URL when known). If the client logo is missing, ASK the user for the client logo URL (e.g. SMI logo) before finalizing the share — or call share_html and the server will inject logos when available.
+- Header (required): left = Nexuses logo, right = client/project logo ONCE in that header only. Do NOT repeat the client logo or client name above the title.
 - Do NOT put a text-only "NEXUSES" eyebrow as the main brand — use the logo image.
 - Title under the header should use Outfit, bold, normal tracking (not ultra-condensed / ultra-wide).
-- Layout: header logos → title + short subtitle → KPI stat cards → chart and/or real HTML <table> (never markdown pipe tables inside HTML).
+- Layout: one header row (logos) → title + short subtitle → KPI cards → chart/table. Keep comfortable left/right page margins (about 5vw / 24px+).
 - Make rows scannable; use rounded-3xl cards, soft shadow, generous padding. Mobile-friendly.
 - Prefer semantic HTML + Tailwind utility classes. No React. Inline a small <script> only for Chart.js.`;
