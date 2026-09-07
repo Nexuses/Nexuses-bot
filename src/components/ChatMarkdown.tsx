@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useId, useState, type ReactNode } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -90,6 +91,220 @@ function cellText(node: unknown): string {
   return "";
 }
 
+function nodeText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (typeof node === "object" && node && "props" in node) {
+    return nodeText((node as { props?: { children?: ReactNode } }).props?.children);
+  }
+  return "";
+}
+
+function isHtmlLanguage(className?: string) {
+  return /\blanguage-(html|htm|xhtml|svg)\b/i.test(className || "");
+}
+
+function looksLikeHtml(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) return true;
+  if (/^<(svg|body|head|main|section|div|table|form|style)[\s>]/i.test(trimmed) && /<\/[a-z]+>\s*$/i.test(trimmed)) {
+    return trimmed.includes("<") && trimmed.includes(">");
+  }
+  return false;
+}
+
+function extractStandaloneHtml(content: string) {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/^```(?:html|htm|xhtml|svg)\s*\n([\s\S]*?)\n```$/i);
+  if (fenced) return fenced[1].trim();
+  if (looksLikeHtml(trimmed) && !trimmed.includes("```")) return trimmed;
+  return "";
+}
+
+function HtmlPreviewModal({
+  html,
+  open,
+  onClose,
+}: {
+  html: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4 sm:p-8">
+      <button className="absolute inset-0" aria-label="Close preview" onClick={onClose} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="relative flex h-[min(88vh,880px)] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-line bg-panel shadow-xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
+          <p id={titleId} className="font-display text-lg tracking-tight">
+            HTML preview
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-line px-3 py-1.5 text-sm text-muted hover:border-sea hover:text-paper"
+          >
+            Close
+          </button>
+        </div>
+        <iframe
+          title="HTML preview"
+          sandbox="allow-scripts allow-forms allow-popups"
+          srcDoc={html}
+          className="h-full w-full flex-1 bg-white"
+        />
+      </div>
+    </div>
+  );
+}
+
+function PreviewButton({ html }: { html: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="rounded-full border border-line bg-panel px-3 py-1 text-xs font-medium text-sea hover:border-sea hover:bg-ink-2"
+      >
+        Preview
+      </button>
+      <HtmlPreviewModal html={html} open={open} onClose={() => setOpen(false)} />
+    </>
+  );
+}
+
+function ShareLinkButton({ html }: { html: string }) {
+  const [busy, setBusy] = useState(false);
+  const [url, setUrl] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
+
+  async function createLink() {
+    if (url) {
+      try {
+        await navigator.clipboard.writeText(url);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      } catch {
+        // Keep the link visible even if clipboard is blocked.
+      }
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/shares", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { share?: { url?: string }; error?: string }
+        | null;
+      if (!res.ok || !data?.share?.url) {
+        setError(data?.error || "Could not create link");
+        return;
+      }
+      setUrl(data.share.url);
+      try {
+        await navigator.clipboard.writeText(data.share.url);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      } catch {
+        // Link still shown below.
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create link");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={() => void createLink()}
+        disabled={busy}
+        className="rounded-full border border-line bg-panel px-3 py-1 text-xs font-medium text-sea hover:border-sea hover:bg-ink-2 disabled:opacity-60"
+      >
+        {busy ? "Sharing…" : copied ? "Copied" : url ? "Copy link" : "Share link"}
+      </button>
+      {url ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="max-w-[220px] truncate text-[11px] text-muted underline decoration-line underline-offset-2 hover:text-sea"
+        >
+          {url}
+        </a>
+      ) : null}
+      {error ? <p className="max-w-[220px] text-right text-[11px] text-red-500">{error}</p> : null}
+    </div>
+  );
+}
+
+function HtmlActions({ html }: { html: string }) {
+  return (
+    <div className="flex items-start gap-2">
+      <PreviewButton html={html} />
+      <ShareLinkButton html={html} />
+    </div>
+  );
+}
+
+function CodeBlock({ className, children }: { className?: string; children?: ReactNode }) {
+  const text = nodeText(children).replace(/\n$/, "");
+  const htmlBlock = isHtmlLanguage(className) || looksLikeHtml(text);
+
+  if (!htmlBlock) {
+    return (
+      <pre className="my-3 overflow-x-auto rounded-2xl bg-ink-2 px-4 py-3 text-sm leading-6 text-paper">
+        <code className={`font-mono text-[13px] ${className || ""}`}>{children}</code>
+      </pre>
+    );
+  }
+
+  return (
+    <div className="my-3 overflow-hidden rounded-2xl border border-line bg-ink-2">
+      <div className="flex items-center justify-between gap-3 border-b border-line/80 px-4 py-2">
+        <span className="text-xs uppercase tracking-[0.14em] text-muted">HTML</span>
+        <HtmlActions html={text} />
+      </div>
+      <pre className="overflow-x-auto px-4 py-3 text-sm leading-6 text-paper">
+        <code className={`font-mono text-[13px] ${className || ""}`}>{children}</code>
+      </pre>
+    </div>
+  );
+}
+
 const components: Components = {
   h1: ({ children }) => (
     <h1 className="mb-3 font-display text-2xl tracking-tight text-paper">{children}</h1>
@@ -140,15 +355,27 @@ const components: Components = {
     <th className="whitespace-nowrap px-3 py-2 font-semibold text-paper">{children}</th>
   ),
   td: ({ children }) => <td className="px-3 py-2 text-paper">{children}</td>,
-  pre: ({ children }) => (
-    <pre className="my-3 overflow-x-auto rounded-2xl bg-ink-2 px-4 py-3 text-sm leading-6 text-paper">
-      {children}
-    </pre>
-  ),
+  pre: ({ children }) => {
+    const child = Array.isArray(children) ? children[0] : children;
+    if (
+      typeof child === "object" &&
+      child &&
+      "props" in child &&
+      (child as { props?: { className?: string; children?: ReactNode } }).props
+    ) {
+      const props = (child as { props: { className?: string; children?: ReactNode } }).props;
+      return <CodeBlock className={props.className}>{props.children}</CodeBlock>;
+    }
+    return (
+      <pre className="my-3 overflow-x-auto rounded-2xl bg-ink-2 px-4 py-3 text-sm leading-6 text-paper">
+        {children}
+      </pre>
+    );
+  },
   code: ({ className, children }) => {
     const block = Boolean(className) || String(children).includes("\n");
     if (block) {
-      return <code className="font-mono text-[13px]">{children}</code>;
+      return <code className={`font-mono text-[13px] ${className || ""}`}>{children}</code>;
     }
     return (
       <code className="rounded-md bg-ink-2 px-1.5 py-0.5 font-mono text-[13px] text-paper">
@@ -159,10 +386,29 @@ const components: Components = {
 };
 
 export function ChatMarkdown({ content }: { content: string }) {
+  const prepared = repairMarkdownTables(unwrap(content));
+  const standalone = extractStandaloneHtml(prepared);
+
+  if (standalone) {
+    return (
+      <div className="chat-md space-y-3">
+        <div className="overflow-hidden rounded-2xl border border-line bg-ink-2">
+          <div className="flex items-center justify-between gap-3 border-b border-line/80 px-4 py-2">
+            <span className="text-xs uppercase tracking-[0.14em] text-muted">HTML</span>
+            <HtmlActions html={standalone} />
+          </div>
+          <pre className="overflow-x-auto px-4 py-3 text-sm leading-6 text-paper">
+            <code className="font-mono text-[13px]">{standalone}</code>
+          </pre>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="chat-md">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {repairMarkdownTables(unwrap(content))}
+        {prepared}
       </ReactMarkdown>
     </div>
   );

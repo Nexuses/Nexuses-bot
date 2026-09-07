@@ -2,12 +2,15 @@
 
 import { useMemo, useState, type FormEvent } from "react";
 import { Field, PrimaryButton } from "@/components/ui";
-import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import type { IntegrationDTO, Provider } from "@/types/chat";
 
 const CATALOG: { provider: Exclude<Provider, "other">; title: string; blurb: string }[] = [
   { provider: "attio", title: "Attio", blurb: "Lists, stages, people, and companies" },
-  { provider: "brevo", title: "Brevo", blurb: "Contacts, email campaigns, and MCP" },
+  {
+    provider: "brevo",
+    title: "Brevo",
+    blurb: "Use an MCP key for full campaign/contact data, or a normal API key",
+  },
   { provider: "lemlist", title: "Lemlist", blurb: "Outreach campaigns, leads, activity" },
 ];
 
@@ -28,6 +31,7 @@ export function IntegrationsPanel({
   const [otherName, setOtherName] = useState("");
   const [otherKey, setOtherKey] = useState("");
   const [otherUrl, setOtherUrl] = useState("");
+  const [addingOther, setAddingOther] = useState(false);
 
   const byProvider = useMemo(() => {
     const map = new Map<string, IntegrationDTO>();
@@ -56,7 +60,6 @@ export function IntegrationsPanel({
         name,
         apiKey: key,
         baseUrl,
-        mcpUrl: provider === "brevo" ? BREVO_MCP_DEFAULT : "",
       }),
     });
     const data = await res.json();
@@ -77,6 +80,7 @@ export function IntegrationsPanel({
       setOtherName("");
       setOtherKey("");
       setOtherUrl("");
+      setAddingOther(false);
     } else {
       setKeys((current) => ({ ...current, [provider]: "" }));
     }
@@ -135,7 +139,15 @@ export function IntegrationsPanel({
                     <p className="font-medium">{item.title}</p>
                     <p className="text-sm text-muted">{item.blurb}</p>
                     {connected ? (
-                      <p className="mt-1 text-xs text-sea">Connected · {connected.keyHint}</p>
+                      <p className="mt-1 text-xs text-sea">
+                        Connected
+                        {item.provider === "brevo"
+                          ? connected.mcpUrl
+                            ? " via MCP"
+                            : " via API"
+                          : ""}{" "}
+                        · {connected.keyHint}
+                      </p>
                     ) : null}
                   </div>
                   {connected ? (
@@ -157,7 +169,7 @@ export function IntegrationsPanel({
                     }}
                   >
                     <Field
-                      label={item.provider === "brevo" ? "API / MCP key" : "API key"}
+                      label={item.provider === "brevo" ? "MCP key (or API key)" : "API key"}
                       type="password"
                       value={keys[item.provider] ?? ""}
                       onChange={(event) =>
@@ -174,56 +186,88 @@ export function IntegrationsPanel({
             );
           })}
 
-          <div className="rounded-2xl border border-line p-4">
-            <p className="font-medium">Other</p>
-            <p className="text-sm text-muted">Any API. Give it a name, key, and optional base URL.</p>
-            {others.map((item) => (
-              <div
-                key={item._id}
-                className="mt-3 flex items-center justify-between rounded-xl bg-ink-2 px-3 py-2"
-              >
-                <span>
-                  <span className="block text-sm">{item.name}</span>
-                  <span className="block text-xs text-muted">
-                    {item.keyHint}
+          {others.map((item) => (
+            <div key={item._id} className="rounded-2xl border border-line p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium">{item.name}</p>
+                  <p className="text-sm text-muted">
+                    Custom API
                     {item.baseUrl ? ` · ${item.baseUrl}` : ""}
-                  </span>
-                </span>
+                  </p>
+                  <p className="mt-1 text-xs text-sea">Connected · {item.keyHint}</p>
+                </div>
                 <button
                   onClick={() => disconnect(item)}
+                  disabled={busy === item._id}
                   className="text-sm text-muted hover:text-paper"
                 >
                   Remove
                 </button>
               </div>
-            ))}
-            <form onSubmit={onOther} className="mt-3 space-y-3">
-              <Field
-                label="Name"
-                value={otherName}
-                onChange={(event) => setOtherName(event.target.value)}
-                placeholder="HubSpot"
-                required
-                minLength={2}
-              />
-              <Field
-                label="API key"
-                type="password"
-                value={otherKey}
-                onChange={(event) => setOtherKey(event.target.value)}
-                required
-              />
-              <Field
-                label="Base URL (optional)"
-                type="url"
-                value={otherUrl}
-                onChange={(event) => setOtherUrl(event.target.value)}
-                placeholder="https://api.example.com"
-              />
-              <PrimaryButton type="submit" tone="sea" disabled={busy === "other" + otherName}>
-                {busy.startsWith("other") ? "Connecting..." : "Add API"}
-              </PrimaryButton>
-            </form>
+            </div>
+          ))}
+
+          <div className="rounded-2xl border border-line p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-medium">Other</p>
+                <p className="text-sm text-muted">
+                  Any custom API. Give it a name, key, and optional base URL.
+                </p>
+              </div>
+              {!addingOther ? (
+                <button
+                  type="button"
+                  onClick={() => setAddingOther(true)}
+                  className="text-sm text-sea hover:text-sea-2"
+                >
+                  Add
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddingOther(false);
+                    setOtherName("");
+                    setOtherKey("");
+                    setOtherUrl("");
+                  }}
+                  className="text-sm text-muted hover:text-paper"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+            {addingOther ? (
+              <form onSubmit={onOther} className="mt-3 space-y-3">
+                <Field
+                  label="Name"
+                  value={otherName}
+                  onChange={(event) => setOtherName(event.target.value)}
+                  placeholder="HubSpot"
+                  required
+                  minLength={2}
+                />
+                <Field
+                  label="API key"
+                  type="password"
+                  value={otherKey}
+                  onChange={(event) => setOtherKey(event.target.value)}
+                  required
+                />
+                <Field
+                  label="Base URL (optional)"
+                  type="url"
+                  value={otherUrl}
+                  onChange={(event) => setOtherUrl(event.target.value)}
+                  placeholder="https://api.example.com"
+                />
+                <PrimaryButton type="submit" tone="sea" disabled={busy === "other" + otherName}>
+                  {busy.startsWith("other") ? "Connecting..." : `Connect ${otherName.trim() || "API"}`}
+                </PrimaryButton>
+              </form>
+            ) : null}
           </div>
         </div>
       </aside>

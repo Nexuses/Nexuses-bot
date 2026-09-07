@@ -5,6 +5,7 @@ import {
   MAX_CHAT_FILES,
   type ExtractedFile,
 } from "@/lib/attachments";
+import { ensureAutomationRunner } from "@/lib/automations";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
 import { getOwnedChat, serializeChat, titleFromText } from "@/lib/chats";
 import { redactSecrets } from "@/lib/integrations";
@@ -22,7 +23,7 @@ export const maxDuration = 120;
 type Params = { params: Promise<{ id: string }> };
 
 function looksLikeWork(text: string) {
-  return /\b(create|add|make|update|delete|remove|send|find|search|list|get|put|connect|set up|setup|build|insert|change|assign|move)\b/i.test(
+  return /\b(create|add|make|update|delete|remove|send|find|search|list|get|put|connect|set up|setup|build|insert|change|assign|move|keep|continue|auto[- ]?update|sync)\b/i.test(
     text,
   );
 }
@@ -53,16 +54,23 @@ function providerGuide(integrations: StoredIntegration[]) {
   }
   if (integrations.some((item) => item.provider === "brevo")) {
     const brevo = integrations.find((item) => item.provider === "brevo");
-    parts.push(
-      `Brevo is connected. Create contacts with brevo_create_contact. For lists, campaigns, or sending, use brevo_api with /v3/ paths.${
-        brevo?.mcpUrl ? ` MCP URL saved: ${brevo.mcpUrl}.` : ""
-      }`,
-    );
+    if (brevo?.mcpUrl) {
+      parts.push(`Brevo is connected via MCP.
+- First call brevo_mcp_list_tools to see available tools.
+- Then call brevo_mcp_call with the tool name and arguments to read/update contacts, campaigns, analytics, lists, CRM, and more.
+- Prefer MCP over guessing REST paths.
+- Keep Attio updated automatically until a campaign completes: call start_campaign_automation with source brevo, campaign, and attio_list.`);
+    } else {
+      parts.push(
+        `Brevo is connected via REST API. Create contacts with brevo_create_contact. For lists, campaigns, or sending, use brevo_api with /v3/ paths. For fuller data access, reconnect Brevo with an MCP key from Brevo → SMTP & API → API Keys (enable Create MCP server API key).`,
+      );
+    }
   }
   if (integrations.some((item) => item.provider === "lemlist")) {
     parts.push(`Lemlist is connected.
 - List campaigns / completed campaigns: call lemlist_list_campaigns once. Completed means status ended.
 - Who opened, clicked, or replied in a campaign: call lemlist_people_by_event ONCE with the campaign name and event (opens, clicks, replies). Then answer with a table of emails. Do not paginate. Do not call lemlist_api for this.
+- Keep Attio updated automatically until a campaign completes: call start_campaign_automation with source lemlist, campaign, and attio_list.
 - Other Lemlist work: lemlist_api with /api/ paths.`);
   }
   if (integrations.some((item) => item.provider === "other")) {
@@ -97,6 +105,8 @@ export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
   const { session, project, error } = await requireProjectMember(id);
   if (error || !session || !project) return error ?? jsonError("Unauthorized", 401);
+
+  ensureAutomationRunner();
 
   const { text, files, chatId: requestedChatId } = await readChatInput(request);
   if (files.length > MAX_CHAT_FILES) return jsonError(`You can attach up to ${MAX_CHAT_FILES} files`);
@@ -186,6 +196,7 @@ Rules:
 - After a successful connect, continue with their original request using the new tools in the same turn when possible.
 - Never repeat a full API key in your reply. Confirm with the last 4 characters only (key hint).
 - If they ask what is connected, call list_integrations. If they ask to remove one, call disconnect_integration.
+- If the user asks to keep updating / continue updating / auto-update Attio from a running Lemlist or Brevo campaign until it completes: call start_campaign_automation (source, campaign, attio_list). Tell them automatic updates are running and will keep syncing in the background until the campaign ends (or they ask to stop). Use list_automations / stop_automation when they ask about or stop that job.
 - If the needed API is not connected and they did not provide a key, ask them to paste the API key here in chat (or use Integrations).
 - Never reveal API keys.
 
@@ -197,7 +208,8 @@ What the user sees (required):
 Formatting (required):
 - Write the final answer in clean Markdown. Use headings, short paragraphs, and bullet lists.
 - When showing 2 or more items with the same fields, use a Markdown table with a header row.
-- Bold important names. Do not dump raw JSON. Do not wrap the whole reply in a code fence.
+- When showing HTML (page, email, invite), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons.
+- If the user asks for a public link / share link for HTML, call share_html and give them the URL.
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on).
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user uploads a CSV for Attio, call attio_import_to_list once. Never import contacts one API call at a time.
@@ -289,6 +301,7 @@ ${providerGuide(integrations)}`;
                   onStatus: (statusText) => send({ type: "status", text: statusText }),
                   userId: session.userId,
                   projectId: id,
+                  origin: new URL(request.url).origin,
                   secretsUsed,
                   onIntegrationsChange: () => publishIntegrations(),
                 });

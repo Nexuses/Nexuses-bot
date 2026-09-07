@@ -12,6 +12,7 @@ import { useRouter } from "next/navigation";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { IntegrationsPanel } from "@/components/IntegrationsPanel";
+import type { AutomationDTO } from "@/lib/serialize-automation";
 import type { ChatAttachment, ChatMessageDTO, ChatThreadDTO, IntegrationDTO } from "@/types/chat";
 import type { ProjectDTO, SessionUser } from "@/types";
 
@@ -145,8 +146,53 @@ export function ProjectChat({
   const [panelOpen, setPanelOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [automations, setAutomations] = useState<AutomationDTO[]>([]);
+  const [stoppingId, setStoppingId] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  async function refreshAutomations() {
+    try {
+      const res = await fetch(`/api/projects/${project._id}/automations`);
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.automations)) {
+        setAutomations(data.automations);
+      }
+    } catch {
+      // ignore poll errors
+    }
+  }
+
+  useEffect(() => {
+    void refreshAutomations();
+    const timer = setInterval(() => void refreshAutomations(), 15_000);
+    return () => clearInterval(timer);
+  }, [project._id]);
+
+  useEffect(() => {
+    if (!busy) void refreshAutomations();
+  }, [busy, project._id]);
+
+  const runningAutomations = automations.filter((item) => item.status === "running");
+
+  async function stopRunningAutomation(item: AutomationDTO) {
+    setStoppingId(item._id);
+    setError("");
+    try {
+      const res = await fetch(`/api/projects/${project._id}/automations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", automationId: item._id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not stop automation");
+      await refreshAutomations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not stop automation");
+    } finally {
+      setStoppingId("");
+    }
+  }
 
   useEffect(() => {
     const el = listRef.current;
@@ -422,6 +468,41 @@ export function ProjectChat({
           </div>
         </div>
       </header>
+
+      {runningAutomations.length ? (
+        <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-3 sm:px-6">
+          <div className="mx-auto flex max-w-4xl flex-col gap-2">
+            {runningAutomations.map((item) => (
+              <div
+                key={item._id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sea/40 bg-sea/10 px-4 py-3"
+              >
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2 text-sm font-medium text-paper">
+                    <span
+                      className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
+                      aria-hidden
+                    />
+                    Automatic update running
+                  </p>
+                  <p className="mt-1 truncate text-xs text-muted">
+                    {item.sourceProvider} · {item.campaignName} → Attio “{item.attioList}”
+                    {item.lastSummary ? ` · ${item.lastSummary}` : ""}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={stoppingId === item._id}
+                  onClick={() => void stopRunningAutomation(item)}
+                  className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
+                >
+                  {stoppingId === item._id ? "Stopping…" : "Stop"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <main className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col overflow-hidden px-4 sm:px-6">
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-8">

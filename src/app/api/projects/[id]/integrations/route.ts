@@ -1,5 +1,4 @@
 import { jsonError } from "@/lib/api";
-import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import {
   displayProviderName,
   normalizeMcpUrl,
@@ -39,10 +38,6 @@ export async function POST(request: Request, { params }: Params) {
     const provider = String(body.provider ?? "") as Provider;
     const apiKey = String(body.apiKey ?? "").trim();
     const baseUrl = String(body.baseUrl ?? "").trim().replace(/\/$/, "");
-    const mcpUrl =
-      provider === "brevo"
-        ? BREVO_MCP_DEFAULT
-        : normalizeMcpUrl(String(body.mcpUrl ?? ""));
     const authType = parseAuthType(body.authType);
     const name =
       provider === "other"
@@ -53,7 +48,12 @@ export async function POST(request: Request, { params }: Params) {
     if (!apiKey) return jsonError("API key is required");
     if (provider === "other" && name.length < 2) return jsonError("Give this API a name");
 
-    await validateIntegration({ provider, apiKey, baseUrl, authType });
+    const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
+    const mcpUrl =
+      provider === "brevo"
+        ? validated.mcpUrl ?? ""
+        : normalizeMcpUrl(String(body.mcpUrl ?? ""));
+
     const saved = await upsertIntegrationDoc({
       userId: session.userId,
       projectId: id,

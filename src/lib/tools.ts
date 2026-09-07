@@ -1,4 +1,14 @@
-import type { ToolDef } from "@/lib/llm";
+import {
+  ensureAutomationRunner,
+  listAutomations,
+  startCampaignAutomation,
+  stopAutomation,
+} from "@/lib/automations";
+import {
+  callBrevoMcpTool,
+  listBrevoMcpTools,
+  validateBrevoMcp,
+} from "@/lib/brevo-mcp";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import {
   displayProviderName,
@@ -9,6 +19,8 @@ import {
   upsertIntegrationDoc,
   maskKey,
 } from "@/lib/integrations";
+import { createHtmlShare } from "@/lib/html-shares";
+import type { ToolDef } from "@/lib/llm";
 import type { AuthType, Provider } from "@/types/chat";
 
 export type StoredIntegration = {
@@ -727,6 +739,87 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "share_html",
+        description:
+          "Publish HTML to a public share link anyone can open. Use when the user asks for a public link, share link, or to share HTML/email/page with others. Pass the full HTML. Return the URL in your reply.",
+        parameters: {
+          type: "object",
+          properties: {
+            html: {
+              type: "string",
+              description: "Full HTML document or snippet to publish",
+            },
+            title: {
+              type: "string",
+              description: "Short title for the share, e.g. Event invite",
+            },
+          },
+          required: ["html"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "start_campaign_automation",
+        description:
+          "Start an automatic background sync: keep updating an Attio list from a running Lemlist or Brevo campaign until the campaign is complete. Use when the user says keep updating, continue syncing, auto-update, or until campaign completes. Requires Attio + Lemlist/Brevo connected.",
+        parameters: {
+          type: "object",
+          properties: {
+            source: {
+              type: "string",
+              enum: ["lemlist", "brevo"],
+              description: "Where the campaign lives",
+            },
+            campaign: {
+              type: "string",
+              description: "Campaign name",
+            },
+            attio_list: {
+              type: "string",
+              description: "Attio list/pipeline name to update",
+            },
+            stage_open: { type: "string", description: "Attio stage for opens. Default open." },
+            stage_click: { type: "string", description: "Attio stage for clicks. Default click." },
+            stage_reply: { type: "string", description: "Attio stage for replies. Default hot." },
+            interval_minutes: {
+              type: "number",
+              description: "How often to sync while running. Default 2.",
+            },
+          },
+          required: ["source", "campaign", "attio_list"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_automations",
+        description: "List automatic sync jobs for this project (running, completed, stopped).",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "stop_automation",
+        description: "Stop a running automatic campaign→Attio sync.",
+        parameters: {
+          type: "object",
+          properties: {
+            campaign: { type: "string", description: "Campaign name to stop syncing" },
+            automation_id: { type: "string", description: "Automation id if known" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
   ];
   const has = (provider: Provider) => integrations.some((item) => item.provider === provider);
 
@@ -824,61 +917,99 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
   }
 
   if (has("brevo")) {
-    tools.push(
-      {
-        type: "function",
-        function: {
-          name: "brevo_list_contacts",
-          description: "List Brevo contacts.",
-          parameters: {
-            type: "object",
-            properties: {
-              limit: { type: "number" },
-              offset: { type: "number" },
+    const brevo = integrations.find((item) => item.provider === "brevo");
+    if (brevo?.mcpUrl) {
+      tools.push(
+        {
+          type: "function",
+          function: {
+            name: "brevo_mcp_list_tools",
+            description:
+              "List all Brevo MCP tools available for this account (contacts, campaigns, analytics, CRM, etc.). Call this first when exploring Brevo data through MCP.",
+            parameters: { type: "object", properties: {}, additionalProperties: false },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "brevo_mcp_call",
+            description:
+              "Call a Brevo MCP tool by name with JSON arguments. Prefer this for reading campaigns, contacts, analytics, lists, and CRM data when Brevo is connected via MCP.",
+            parameters: {
+              type: "object",
+              properties: {
+                tool: {
+                  type: "string",
+                  description: "Exact MCP tool name from brevo_mcp_list_tools",
+                },
+                arguments: {
+                  type: "object",
+                  description: "Arguments object for that MCP tool",
+                },
+              },
+              required: ["tool"],
+              additionalProperties: false,
             },
-            additionalProperties: false,
           },
         },
-      },
-      {
-        type: "function",
-        function: {
-          name: "brevo_create_contact",
-          description: "Create or update a Brevo contact by email. Use this when the user asks to add a contact.",
-          parameters: {
-            type: "object",
-            properties: {
-              email: { type: "string" },
-              firstName: { type: "string" },
-              lastName: { type: "string" },
+      );
+    } else {
+      tools.push(
+        {
+          type: "function",
+          function: {
+            name: "brevo_list_contacts",
+            description: "List Brevo contacts.",
+            parameters: {
+              type: "object",
+              properties: {
+                limit: { type: "number" },
+                offset: { type: "number" },
+              },
+              additionalProperties: false,
             },
-            required: ["email"],
-            additionalProperties: false,
           },
         },
-      },
-      {
-        type: "function",
-        function: {
-          name: "brevo_list_campaigns",
-          description: "List Brevo email campaigns.",
-          parameters: {
-            type: "object",
-            properties: { limit: { type: "number" } },
-            additionalProperties: false,
+        {
+          type: "function",
+          function: {
+            name: "brevo_create_contact",
+            description: "Create or update a Brevo contact by email. Use this when the user asks to add a contact.",
+            parameters: {
+              type: "object",
+              properties: {
+                email: { type: "string" },
+                firstName: { type: "string" },
+                lastName: { type: "string" },
+              },
+              required: ["email"],
+              additionalProperties: false,
+            },
           },
         },
-      },
-      {
-        type: "function",
-        function: {
-          name: "brevo_api",
-          description:
-            "Call any Brevo API v3 endpoint. Use this to create lists, campaigns, send emails, or any other Brevo action. Paths start with /v3/.",
-          parameters: httpToolParams(),
+        {
+          type: "function",
+          function: {
+            name: "brevo_list_campaigns",
+            description: "List Brevo email campaigns.",
+            parameters: {
+              type: "object",
+              properties: { limit: { type: "number" } },
+              additionalProperties: false,
+            },
+          },
         },
-      },
-    );
+        {
+          type: "function",
+          function: {
+            name: "brevo_api",
+            description:
+              "Call any Brevo API v3 endpoint. Use this to create lists, campaigns, send emails, or any other Brevo action. Paths start with /v3/.",
+            parameters: httpToolParams(),
+          },
+        },
+      );
+    }
   }
 
   if (has("lemlist")) {
@@ -1002,6 +1133,7 @@ export type ToolContext = {
   onStatus?: (text: string) => void;
   userId?: string;
   projectId?: string;
+  origin?: string;
   secretsUsed?: string[];
   onIntegrationsChange?: (integrations: StoredIntegration[]) => void;
 };
@@ -1035,6 +1167,81 @@ export async function runTool(
     });
   }
 
+  if (name === "share_html") {
+    if (!context.userId) throw new Error("Cannot create a share link in this context");
+    const html = String(args.html || args.content || "").trim();
+    const title = String(args.title || "").trim();
+    const origin = context.origin || "http://localhost:3000";
+    context.onStatus?.("Creating a public link…");
+    const share = await createHtmlShare({
+      userId: context.userId,
+      projectId: context.projectId,
+      html,
+      title: title || undefined,
+      origin,
+    });
+    return clip({
+      ok: true,
+      title: share.title,
+      url: share.url,
+      note: "Share this public URL. Anyone with the link can open the HTML.",
+    });
+  }
+
+  if (name === "start_campaign_automation") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot start automation in this context");
+    }
+    ensureAutomationRunner();
+    const source = String(args.source || args.provider || "lemlist").toLowerCase();
+    if (source !== "lemlist" && source !== "brevo") {
+      throw new Error('source must be "lemlist" or "brevo"');
+    }
+    const campaign = String(args.campaign || args.campaignName || "").trim();
+    const attioList = String(args.attio_list || args.attioList || args.list || "").trim();
+    if (!campaign) throw new Error("Campaign name is required");
+    if (!attioList) throw new Error("Attio list name is required");
+    context.onStatus?.(`Starting automatic updates for ${campaign}…`);
+    const automation = await startCampaignAutomation({
+      userId: context.userId,
+      projectId: context.projectId,
+      sourceProvider: source,
+      campaignName: campaign,
+      attioList,
+      stageOpen: String(args.stage_open || args.stageOpen || "open"),
+      stageClick: String(args.stage_click || args.stageClick || "click"),
+      stageReply: String(args.stage_reply || args.stageReply || "hot"),
+      intervalMinutes: Number(args.interval_minutes || args.intervalMinutes) || 2,
+    });
+    return clip({
+      ok: true,
+      automation,
+      note: `Automatic update is running. Attio list "${automation.attioList}" will keep syncing from ${automation.sourceProvider} campaign "${automation.campaignName}" until the campaign completes (or you stop it).`,
+    });
+  }
+
+  if (name === "list_automations") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot list automations in this context");
+    }
+    ensureAutomationRunner();
+    const automations = await listAutomations(context.userId, context.projectId);
+    return clip({ count: automations.length, automations });
+  }
+
+  if (name === "stop_automation") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot stop automation in this context");
+    }
+    const stopped = await stopAutomation({
+      userId: context.userId,
+      projectId: context.projectId,
+      automationId: String(args.automation_id || args.automationId || "").trim() || undefined,
+      campaignName: String(args.campaign || args.campaignName || "").trim() || undefined,
+    });
+    return clip({ ok: true, automation: stopped });
+  }
+
   if (name === "connect_integration") {
     if (!context.userId || !context.projectId) {
       throw new Error("Cannot save integrations in this context");
@@ -1044,13 +1251,13 @@ export async function runTool(
     if (!apiKey) throw new Error("API key is required");
     const authType = parseAuthType(args.auth_type || args.authType);
     const baseUrl = String(args.base_url || args.baseUrl || "").trim();
-    const mcpUrl =
-      provider === "brevo"
-        ? BREVO_MCP_DEFAULT
-        : normalizeMcpUrl(String(args.mcp_url || args.mcpUrl || ""));
     const label = displayProviderName(provider, String(args.name || ""));
     context.onStatus?.(`Connecting ${label} and checking the API key…`);
-    await validateIntegration({ provider, apiKey, baseUrl, authType });
+    const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
+    const mcpUrl =
+      provider === "brevo"
+        ? validated.mcpUrl ?? ""
+        : normalizeMcpUrl(String(args.mcp_url || args.mcpUrl || ""));
     const saved = await upsertIntegrationDoc({
       userId: context.userId,
       projectId: context.projectId,
@@ -1082,8 +1289,11 @@ export async function runTool(
       connected: saved.name,
       provider: saved.provider,
       keyHint: saved.keyHint,
+      mode: provider === "brevo" ? (saved.mcpUrl ? "mcp" : "api") : null,
       mcpUrl: saved.mcpUrl || null,
-      note: `${saved.name} is connected. You can use its tools now in this chat.`,
+      note: saved.mcpUrl
+        ? `${saved.name} is connected via MCP. You can fetch campaigns, contacts, and analytics through Brevo MCP tools now.`
+        : `${saved.name} is connected. You can use its tools now in this chat.`,
     });
   }
 
@@ -1188,6 +1398,35 @@ export async function runTool(
     const attio = findByProvider(integrations, "attio");
     const url = joinUrl(ATTIO, String(args.path || ""), "api.attio.com");
     return providerRequest(url, method, attioHeaders(attio.apiKey), args.body);
+  }
+
+  if (name === "brevo_mcp_list_tools") {
+    const brevo = findByProvider(integrations, "brevo");
+    const tools = await listBrevoMcpTools(brevo.apiKey, brevo.mcpUrl || BREVO_MCP_DEFAULT);
+    return clip({
+      mode: "mcp",
+      count: tools.length,
+      tools: tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+      })),
+    }, 14000);
+  }
+
+  if (name === "brevo_mcp_call") {
+    const brevo = findByProvider(integrations, "brevo");
+    const toolName = String(args.tool || args.name || "").trim();
+    if (!toolName) throw new Error("MCP tool name is required");
+    const toolArgs =
+      args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
+        ? (args.arguments as Record<string, unknown>)
+        : {};
+    return callBrevoMcpTool(
+      brevo.apiKey,
+      toolName,
+      toolArgs,
+      brevo.mcpUrl || BREVO_MCP_DEFAULT,
+    );
   }
 
   if (name === "brevo_list_contacts") {
@@ -1326,47 +1565,29 @@ export async function validateIntegration(input: {
   apiKey: string;
   baseUrl?: string;
   authType?: AuthType;
-}) {
+}): Promise<{ mcpUrl?: string }> {
   if (input.provider === "attio") {
     await requestJson(`${ATTIO}/v2/objects`, {
       headers: attioHeaders(input.apiKey),
     });
-    return;
+    return {};
   }
   if (input.provider === "brevo") {
     try {
       await requestJson(`${BREVO}/v3/account`, {
         headers: brevoHeaders(input.apiKey),
       });
-      return;
+      return { mcpUrl: "" };
     } catch {
-      // MCP keys use Bearer auth against Brevo's MCP endpoint, not the REST api-key header.
-      await requestJson(BREVO_MCP_DEFAULT, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${input.apiKey}`,
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "nexuses", version: "1.0.0" },
-          },
-        }),
-      });
-      return;
+      await validateBrevoMcp(input.apiKey, BREVO_MCP_DEFAULT);
+      return { mcpUrl: BREVO_MCP_DEFAULT };
     }
   }
   if (input.provider === "lemlist") {
     await requestJson(`${LEMLIST}/api/campaigns?limit=1&offset=0`, {
       headers: lemlistHeaders(input.apiKey),
     });
-    return;
+    return {};
   }
   if (input.baseUrl) {
     const probe: StoredIntegration = {
@@ -1385,4 +1606,5 @@ export async function validateIntegration(input: {
       // Custom APIs often reject a bare GET on the root. Key is still stored.
     }
   }
+  return {};
 }
