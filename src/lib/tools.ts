@@ -10,6 +10,7 @@ import {
   listBrevoCampaignsViaMcp,
   listBrevoMcpTools,
   resolveBrevoMcpToolName,
+  summarizeBrevoCampaigns,
   validateBrevoMcp,
 } from "@/lib/brevo-mcp";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
@@ -927,14 +928,14 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "brevo_list_campaigns",
         description:
-          "List Brevo email campaigns. Use this for completed/sent/draft campaigns. Pass status=sent for completed campaigns. Prefer this over guessing MCP tool names.",
+          "List Brevo email campaigns as a compact summary (name, subject, status, dates, stats — NO HTML). Use for any campaign list / partial list. Only set status when the user asks for a specific status (sent/completed, draft, etc.). Default is ALL campaigns.",
         parameters: {
           type: "object",
           properties: {
             status: {
               type: "string",
               description:
-                "Filter: sent (completed), draft, queued, suspended, archive, in_process, or omit for all",
+                "Optional filter only when user asks: sent, draft, queued, suspended, archive, in_process. Leave empty for a partial/full list of all campaigns.",
             },
             limit: { type: "number", description: "Max campaigns, default 50" },
             offset: { type: "number" },
@@ -1534,30 +1535,49 @@ export async function runTool(
     const brevo = findByProvider(integrations, "brevo");
     const limit = Math.min(Number(args.limit) || 50, 100);
     const offset = Number(args.offset) || 0;
-    const status = String(args.status || "").trim();
+    // Only filter when the model explicitly passes a real status — not "partial"/"all".
+    const rawStatus = String(args.status || "").trim().toLowerCase();
+    const status = [
+      "sent",
+      "draft",
+      "queued",
+      "suspended",
+      "archive",
+      "in_process",
+      "inProcess",
+    ].includes(rawStatus)
+      ? rawStatus === "inprocess"
+        ? "in_process"
+        : rawStatus
+      : "";
     context.onStatus?.(
-      status
-        ? `Loading Brevo campaigns (${status})…`
-        : "Loading Brevo campaigns…",
+      status ? `Loading Brevo campaigns (${status})…` : "Loading Brevo campaigns…",
     );
 
-    // REST works for classic API keys; MCP keys need the campaign MCP path.
     if (!brevo.mcpUrl) {
-      const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      const qs = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+        excludeHtmlContent: "true",
+      });
       if (status) qs.set("status", status);
       const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
         headers: brevoHeaders(brevo.apiKey),
       });
-      return clip(data);
+      return clip({ mode: "rest", ...summarizeBrevoCampaigns(data, { limit }) });
     }
 
     try {
-      const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      const qs = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+        excludeHtmlContent: "true",
+      });
       if (status) qs.set("status", status);
       const data = await requestJson(`${BREVO}/v3/emailCampaigns?${qs}`, {
         headers: brevoHeaders(brevo.apiKey),
       });
-      return clip({ mode: "rest", ...((data as object) || {}) });
+      return clip({ mode: "rest", ...summarizeBrevoCampaigns(data, { limit }) });
     } catch {
       const viaMcp = await listBrevoCampaignsViaMcp(brevo.apiKey, {
         status: status || undefined,

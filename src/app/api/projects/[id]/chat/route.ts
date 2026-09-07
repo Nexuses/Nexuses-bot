@@ -56,7 +56,7 @@ function providerGuide(integrations: StoredIntegration[]) {
     const brevo = integrations.find((item) => item.provider === "brevo");
     if (brevo?.mcpUrl) {
       parts.push(`Brevo is connected via MCP.
-- For campaigns / completed / sent campaigns: call brevo_list_campaigns once with status "sent". Never guess MCP tool names for this.
+- For campaigns / completed / sent campaigns: call brevo_list_campaigns once. Use status "sent" ONLY if the user asked for completed/sent. For "partial list" / "list campaigns", omit status (all campaigns). The tool returns a compact summary without HTML — never call raw MCP campaign list tools for this.
 - To explore other MCP actions: call brevo_mcp_list_tools with query (e.g. "campaign", "contact"). Never list the full unfiltered catalog.
 - Then call brevo_mcp_call with an exact tool name from that filtered list.
 - Keep Attio updated automatically until a campaign completes: call start_campaign_automation with source brevo, campaign, and attio_list.`);
@@ -214,7 +214,7 @@ Formatting (required):
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user uploads a CSV for Attio, call attio_import_to_list once. Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
-- If the user asks for Brevo campaigns / completed / sent campaigns, call brevo_list_campaigns once (status sent for completed). Do not guess Brevo MCP tool names.
+- If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns. Do not guess Brevo MCP tool names.
 - Stay on the product the user is talking about. A Lemlist question is not an Attio import.
 
 Connected APIs: ${connected.length ? connected.join(", ") : "none yet"}.

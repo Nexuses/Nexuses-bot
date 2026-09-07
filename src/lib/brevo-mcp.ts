@@ -155,6 +155,16 @@ export async function callBrevoMcpTool(
   args: Record<string, unknown> = {},
   mcpUrl = BREVO_MCP_DEFAULT,
 ) {
+  const raw = await callBrevoMcpToolRaw(apiKey, toolName, args, mcpUrl);
+  return clip(raw ?? { ok: true }, 14000);
+}
+
+export async function callBrevoMcpToolRaw(
+  apiKey: string,
+  toolName: string,
+  args: Record<string, unknown> = {},
+  mcpUrl = BREVO_MCP_DEFAULT,
+) {
   const url = mcpUrl || BREVO_MCP_DEFAULT;
   return withMcpSession(url, apiKey, async (sessionId) => {
     const result = await mcpRequest(
@@ -164,8 +174,128 @@ export async function callBrevoMcpTool(
       { name: toolName, arguments: args },
       sessionId,
     );
-    return clip(result.data ?? { ok: true }, 14000);
+    return result.data ?? null;
   });
+}
+
+const HTML_KEYS = new Set([
+  "htmlcontent",
+  "html",
+  "htmlurl",
+  "previewtext",
+  "mirroractive",
+]);
+
+function asCampaignObjects(data: unknown): Record<string, unknown>[] {
+  if (!data) return [];
+  if (typeof data === "string") {
+    try {
+      return asCampaignObjects(JSON.parse(data));
+    } catch {
+      // MCP often wraps JSON in text content.
+      const match = data.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+      if (match) {
+        try {
+          return asCampaignObjects(JSON.parse(match[0]));
+        } catch {
+          return [];
+        }
+      }
+      return [];
+    }
+  }
+  if (Array.isArray(data)) {
+    return data.filter((item): item is Record<string, unknown> => !!item && typeof item === "object");
+  }
+  if (typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    // MCP tools/call shape: { content: [{ type: "text", text: "..." }] }
+    if (Array.isArray(record.content)) {
+      const texts = record.content
+        .map((item) =>
+          item && typeof item === "object" && "text" in item
+            ? String((item as { text?: unknown }).text || "")
+            : "",
+        )
+        .filter(Boolean);
+      if (texts.length) return asCampaignObjects(texts.join("\n"));
+    }
+    for (const key of ["campaigns", "data", "result", "items", "emailCampaigns"]) {
+      if (record[key] != null) {
+        const nested = asCampaignObjects(record[key]);
+        if (nested.length) return nested;
+      }
+    }
+    if ("name" in record || "id" in record || "status" in record) return [record];
+  }
+  return [];
+}
+
+function pickStats(campaign: Record<string, unknown>) {
+  const stats =
+    (campaign.statistics as Record<string, unknown> | undefined) ||
+    (campaign.globalStats as Record<string, unknown> | undefined) ||
+    {};
+  const global =
+    (stats.globalStats as Record<string, unknown> | undefined) ||
+    (stats.globalStatistics as Record<string, unknown> | undefined) ||
+    stats;
+  return {
+    sent: global.sent ?? global.delivered ?? undefined,
+    delivered: global.delivered ?? undefined,
+    uniqueOpens: global.uniqueOpens ?? global.viewed ?? undefined,
+    uniqueClicks: global.uniqueClicks ?? global.clickers ?? undefined,
+    unsubscriptions: global.unsubscriptions ?? undefined,
+    softBounces: global.softBounces ?? undefined,
+    hardBounces: global.hardBounces ?? undefined,
+  };
+}
+
+/** Compact campaign rows for the LLM — never include HTML bodies. */
+export function summarizeBrevoCampaigns(data: unknown, options?: { limit?: number }) {
+  const limit = Math.min(Math.max(Number(options?.limit) || 50, 1), 100);
+  const campaigns = asCampaignObjects(data).slice(0, limit).map((campaign) => {
+    const sender =
+      campaign.sender && typeof campaign.sender === "object"
+        ? (campaign.sender as Record<string, unknown>)
+        : {};
+    return {
+      id: campaign.id ?? campaign.campaignId ?? undefined,
+      name: campaign.name ?? campaign.campaignName ?? "",
+      subject: campaign.subject ?? "",
+      status: campaign.status ?? "",
+      type: campaign.type ?? "",
+      scheduledAt: campaign.scheduledAt ?? "",
+      sentDate: campaign.sentDate ?? campaign.sentAt ?? "",
+      createdAt: campaign.createdAt ?? "",
+      modifiedAt: campaign.modifiedAt ?? "",
+      sender: {
+        name: sender.name ?? "",
+        email: sender.email ?? "",
+      },
+      stats: pickStats(campaign),
+    };
+  });
+
+  return {
+    count: campaigns.length,
+    campaigns,
+    note: "HTML bodies were removed. This is a compact partial/summary list suitable for tables.",
+  };
+}
+
+function stripHtmlFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripHtmlFields);
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (HTML_KEYS.has(key.toLowerCase())) continue;
+    if (typeof nested === "string" && nested.length > 500 && /<\s*html|<\s*body|<\s*div/i.test(nested)) {
+      continue;
+    }
+    out[key] = stripHtmlFields(nested);
+  }
+  return out;
 }
 
 /** List email campaigns via focused campaign MCP (avoids 280-tool mega-server). */
@@ -183,12 +313,23 @@ export async function listBrevoCampaignsViaMcp(
   const offset = Math.max(Number(options.offset) || 0, 0);
   const type = String(options.type || "").trim() || undefined;
 
-  const args: Record<string, unknown> = { limit, offset };
+  // Ask Brevo to omit HTML when supported; we also strip it ourselves.
+  const args: Record<string, unknown> = {
+    limit,
+    offset,
+    excludeHtmlContent: true,
+    exclude_html_content: true,
+  };
   if (status) args.status = status;
   if (type) args.type = type;
 
   const urls = [BREVO_MCP_CAMPAIGNS, BREVO_MCP_DEFAULT];
-  const candidates = ["get_email_campaigns", "list_email_campaigns", "getEmailCampaigns"];
+  const candidates = [
+    "get_email_campaigns",
+    "list_email_campaigns",
+    "getEmailCampaigns",
+    "email_campaign_management_get_email_campaigns",
+  ];
 
   let lastError = "";
   for (const url of urls) {
@@ -204,8 +345,7 @@ export async function listBrevoCampaignsViaMcp(
       candidates
         .map((name) => resolveBrevoMcpToolName(tools, name).exact)
         .find(Boolean) ||
-      resolveBrevoMcpToolName(tools, "get_email_campaigns").suggestions[0] ||
-      tools.find((t) => /get_email_campaigns/i.test(t.name))?.name ||
+      tools.find((t) => /get_email_campaigns$/i.test(t.name))?.name ||
       tools.find((t) => /email.?campaign/i.test(t.name) && /(get|list)/i.test(t.name))?.name;
 
     if (!resolved) {
@@ -218,13 +358,25 @@ export async function listBrevoCampaignsViaMcp(
     }
 
     try {
-      const raw = await callBrevoMcpTool(apiKey, resolved, args, url);
+      // Fetch in small pages so HTML (if still present) cannot wipe the whole list.
+      const pageSize = Math.min(limit, 5);
+      const collected: Record<string, unknown>[] = [];
+      for (let pageOffset = offset; collected.length < limit; pageOffset += pageSize) {
+        const pageArgs = { ...args, limit: pageSize, offset: pageOffset };
+        const raw = await callBrevoMcpToolRaw(apiKey, resolved, pageArgs, url);
+        const stripped = stripHtmlFields(raw);
+        const page = summarizeBrevoCampaigns(stripped, { limit: pageSize }).campaigns;
+        if (!page.length) break;
+        collected.push(...page);
+        if (page.length < pageSize) break;
+      }
+
       return {
         ok: true as const,
         tool: resolved,
         mcpUrl: url,
         status: status || "any",
-        data: raw,
+        ...summarizeBrevoCampaigns(collected, { limit }),
       };
     } catch (err) {
       lastError = err instanceof Error ? err.message : "tools/call failed";

@@ -18,6 +18,9 @@ export function openingStatus(message: string, fileNames: string[]) {
     return "Setting up the connection…";
   }
   if (/attio/i.test(message)) return "Working with Attio…";
+  if (/brevo/i.test(message) && /campaign/i.test(message)) {
+    return "Loading Brevo campaigns…";
+  }
   if (/brevo/i.test(message)) return "Working with Brevo…";
   if (/open|click|repl(y|ies)|campaign/i.test(message) && /lemlist|campaign/i.test(message)) {
     return "Looking that up in Lemlist…";
