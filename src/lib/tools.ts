@@ -1193,7 +1193,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
     );
   }
 
-  if (findByProvider(integrations, "notion")) {
+  if (has("notion")) {
     tools.push(
       {
         type: "function",
