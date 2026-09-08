@@ -32,7 +32,7 @@ import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
 import { notionOauthConfigured, notionRequest } from "@/lib/oauth/notion";
 import { Integration } from "@/models/Integration";
-import { createHtmlShare } from "@/lib/html-shares";
+import { createHtmlShare, beginHtmlDraft, appendHtmlDraft, finishHtmlDraft, createDataDashboardShare } from "@/lib/html-shares";
 import { fetchPublicUrl } from "@/lib/fetch-url";
 import type { ToolDef } from "@/lib/llm";
 import type { AuthType, Provider } from "@/types/chat";
@@ -822,13 +822,13 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "share_html",
         description:
-          "Publish HTML to a public share link anyone can open. Header will show Nexuses logo (left) and the project/client logo (right). Pass client_logo if the user provided a custom client logo URL. Return the URL in your reply.",
+          "Publish SMALL HTML to a public share link (short pages / tables under ~40 rows). For LARGE HTML use share_html_begin → share_html_append → share_html_finish. For campaign/lead tables prefer share_data_dashboard. Header shows Nexuses logo (left) and client logo (right).",
         parameters: {
           type: "object",
           properties: {
             html: {
               type: "string",
-              description: "Full HTML document or snippet to publish",
+              description: "Full HTML document or snippet to publish (keep small — large payloads truncate)",
             },
             title: {
               type: "string",
@@ -845,6 +845,112 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
             },
           },
           required: ["html"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "share_html_begin",
+        description:
+          "Start a chunked HTML publish for LARGE dashboards. Returns draft_id. Then call share_html_append many times, then share_html_finish.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Dashboard title" },
+            client_logo: { type: "string" },
+            client_name: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "share_html_append",
+        description:
+          "Append the next HTML chunk to a draft (max ~12000 characters per chunk). Call repeatedly until the full document is uploaded. You may call this tool multiple times in one turn.",
+        parameters: {
+          type: "object",
+          properties: {
+            draft_id: { type: "string", description: "From share_html_begin" },
+            chunk: { type: "string", description: "Next contiguous HTML slice (≤12000 chars)" },
+          },
+          required: ["draft_id", "chunk"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "share_html_finish",
+        description:
+          "Finalize a chunked HTML draft and return the public /p/... URL. Call only after all chunks were appended.",
+        parameters: {
+          type: "object",
+          properties: {
+            draft_id: { type: "string" },
+            title: { type: "string" },
+            client_logo: { type: "string" },
+            client_name: { type: "string" },
+          },
+          required: ["draft_id"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "share_data_dashboard",
+        description:
+          "BEST for large campaign/lead reports. Pass structured JSON (title, kpis, columns, rows) — the server builds a branded HTML dashboard with table + optional chart. Supports hundreds of rows without truncating HTML. Prefer this over hand-written HTML tables.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string" },
+            subtitle: { type: "string" },
+            kpis: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string" },
+                  value: { type: "string" },
+                },
+                required: ["label", "value"],
+              },
+              description: "Up to 8 KPI cards",
+            },
+            columns: {
+              type: "array",
+              items: { type: "string" },
+              description: "Table header labels",
+            },
+            rows: {
+              type: "array",
+              items: {
+                type: "array",
+                items: { type: "string" },
+              },
+              description: "Table body: each row is an array of cell strings aligned to columns",
+            },
+            chart: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["bar", "doughnut"] },
+                title: { type: "string" },
+                labels: { type: "array", items: { type: "string" } },
+                values: { type: "array", items: { type: "number" } },
+              },
+            },
+            client_logo: { type: "string" },
+            client_name: { type: "string" },
+          },
+          required: ["title", "columns", "rows"],
           additionalProperties: false,
         },
       },
@@ -1344,7 +1450,11 @@ export async function runTool(
     if (rawArgs && typeof rawArgs === "object") args = rawArgs;
     else if (rawArgs) args = JSON.parse(rawArgs);
   } catch {
-    throw new Error("Invalid tool arguments");
+    const hint =
+      name === "share_html" || name.startsWith("share_html_") || name === "share_data_dashboard"
+        ? " HTML/tool JSON was truncated. For large pages use share_data_dashboard (rows as JSON) or share_html_begin → share_html_append (≤12000 chars) → share_html_finish."
+        : "";
+    throw new Error(`Invalid tool arguments.${hint}`);
   }
 
   const method = String(args.method || "GET").toUpperCase();
@@ -1404,6 +1514,11 @@ export async function runTool(
     const clientLogo = String(args.client_logo || args.clientLogo || context.projectLogo || "").trim();
     const clientName = String(args.client_name || args.clientName || context.projectName || "").trim();
     const origin = context.origin;
+    if (html.length > 80_000) {
+      throw new Error(
+        `HTML is too large for a single share_html call (${html.length} chars). Use share_data_dashboard for tables, or share_html_begin → share_html_append → share_html_finish.`,
+      );
+    }
     context.onStatus?.("Creating a public link…");
     const share = await createHtmlShare({
       userId: context.userId,
@@ -1419,6 +1534,111 @@ export async function runTool(
       title: share.title,
       url: share.url,
       note: "Share this public URL. Header shows Nexuses logo (left) and client/project logo (right).",
+    });
+  }
+
+  if (name === "share_html_begin") {
+    if (!context.userId) throw new Error("Cannot create a share link in this context");
+    context.onStatus?.("Starting chunked HTML publish…");
+    const draft = await beginHtmlDraft({
+      userId: context.userId,
+      projectId: context.projectId,
+      title: String(args.title || "").trim() || undefined,
+      clientLogoUrl: String(args.client_logo || args.clientLogo || context.projectLogo || "").trim() || undefined,
+      clientName: String(args.client_name || args.clientName || context.projectName || "").trim() || undefined,
+    });
+    return clip({ ok: true, ...draft });
+  }
+
+  if (name === "share_html_append") {
+    if (!context.userId) throw new Error("Cannot create a share link in this context");
+    const draftId = String(args.draft_id || args.draftId || "").trim();
+    const chunk = String(args.chunk || args.html || "");
+    context.onStatus?.("Uploading HTML chunk…");
+    const progress = await appendHtmlDraft({
+      userId: context.userId,
+      draftId,
+      chunk,
+    });
+    return clip({ ok: true, ...progress });
+  }
+
+  if (name === "share_html_finish") {
+    if (!context.userId) throw new Error("Cannot create a share link in this context");
+    const draftId = String(args.draft_id || args.draftId || "").trim();
+    context.onStatus?.("Publishing the dashboard…");
+    const share = await finishHtmlDraft({
+      userId: context.userId,
+      draftId,
+      origin: context.origin,
+      title: String(args.title || "").trim() || undefined,
+      clientLogoUrl: String(args.client_logo || args.clientLogo || "").trim() || undefined,
+      clientName: String(args.client_name || args.clientName || "").trim() || undefined,
+    });
+    return clip({
+      ok: true,
+      title: share.title,
+      url: share.url,
+      note: "Chunked publish complete. Paste this exact URL in your reply.",
+    });
+  }
+
+  if (name === "share_data_dashboard") {
+    if (!context.userId) throw new Error("Cannot create a share link in this context");
+    const title = String(args.title || "").trim();
+    if (!title) throw new Error("title is required");
+    const columns = asStringArray(args.columns);
+    if (!columns.length) throw new Error("columns are required");
+    const rawRows = Array.isArray(args.rows) ? args.rows : [];
+    const rows = rawRows.map((row) =>
+      Array.isArray(row) ? row.map((cell) => (cell == null ? "" : String(cell))) : [String(row ?? "")],
+    );
+    const kpis = Array.isArray(args.kpis)
+      ? args.kpis.map((item) => {
+          const row = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+          return {
+            label: String(row.label || "").trim(),
+            value: String(row.value ?? "").trim(),
+          };
+        })
+      : [];
+    let chart: {
+      type?: "bar" | "doughnut";
+      title?: string;
+      labels: string[];
+      values: number[];
+    } | undefined;
+    if (args.chart && typeof args.chart === "object") {
+      const c = args.chart as Record<string, unknown>;
+      chart = {
+        type: c.type === "doughnut" ? "doughnut" : "bar",
+        title: String(c.title || "").trim() || undefined,
+        labels: asStringArray(c.labels),
+        values: (Array.isArray(c.values) ? c.values : []).map((n) => Number(n) || 0),
+      };
+    }
+    context.onStatus?.("Building the dashboard…");
+    const share = await createDataDashboardShare({
+      userId: context.userId,
+      projectId: context.projectId,
+      origin: context.origin,
+      clientLogoUrl: String(args.client_logo || args.clientLogo || context.projectLogo || "").trim() || undefined,
+      clientName: String(args.client_name || args.clientName || context.projectName || "").trim() || undefined,
+      dashboard: {
+        title,
+        subtitle: String(args.subtitle || "").trim() || undefined,
+        kpis,
+        columns,
+        rows,
+        chart,
+      },
+    });
+    return clip({
+      ok: true,
+      title: share.title,
+      url: share.url,
+      rows: rows.length,
+      note: "Server-built dashboard. Paste this exact URL in your reply.",
     });
   }
 

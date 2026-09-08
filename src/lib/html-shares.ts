@@ -1,10 +1,19 @@
 import { randomBytes } from "crypto";
 import { dbConnect } from "@/lib/db";
-import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
+import {
+  enhanceSharedHtml,
+  renderDataDashboard,
+  type DataDashboardInput,
+} from "@/lib/html-dashboard-kit";
+import { HtmlDraft } from "@/models/HtmlDraft";
 import { HtmlShare } from "@/models/HtmlShare";
 import { Project } from "@/models/Project";
 
-export const MAX_SHARE_HTML_CHARS = 400_000;
+/** Mongo docs can hold ~16MB; keep headroom for branding wrap. */
+export const MAX_SHARE_HTML_CHARS = 2_000_000;
+/** Per-chunk size for share_html_append — fits safely in LLM tool args. */
+export const MAX_HTML_CHUNK_CHARS = 12_000;
+const DRAFT_TTL_MS = 2 * 60 * 60 * 1000;
 
 /** Public site origin for share links. Set APP_URL in .env (no trailing slash). */
 export function getAppOrigin(fallback?: string) {
@@ -42,7 +51,7 @@ export function normalizeSharedHtml(raw: string) {
   const html = raw.trim();
   if (!html) throw new Error("HTML is required");
   if (html.length > MAX_SHARE_HTML_CHARS) {
-    throw new Error("HTML is too large to share (max about 400KB)");
+    throw new Error("HTML is too large to share (max about 2MB)");
   }
   if (!/<[a-z!/?]/i.test(html) && !/\|/.test(html)) {
     throw new Error("That does not look like HTML");
@@ -109,6 +118,130 @@ export async function createHtmlShare(input: {
     title,
     url: absoluteShareUrl(input.origin || "", publicId),
   };
+}
+
+export async function beginHtmlDraft(input: {
+  userId: string;
+  projectId?: string;
+  title?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
+  await dbConnect();
+  const draftId = makePublicId();
+  const branding = await resolveClientBranding(input);
+  await HtmlDraft.create({
+    draftId,
+    userId: input.userId,
+    projectId: input.projectId || undefined,
+    title: (input.title || "").trim().slice(0, 120),
+    clientLogoUrl: branding.clientLogoUrl,
+    clientName: branding.clientName,
+    buffer: "",
+    expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
+  });
+  return {
+    draftId,
+    maxChunkChars: MAX_HTML_CHUNK_CHARS,
+    maxTotalChars: MAX_SHARE_HTML_CHARS,
+    note: `Append HTML with share_html_append in chunks of ≤${MAX_HTML_CHUNK_CHARS} chars, then call share_html_finish.`,
+  };
+}
+
+export async function appendHtmlDraft(input: {
+  userId: string;
+  draftId: string;
+  chunk: string;
+}) {
+  await dbConnect();
+  const draftId = input.draftId.trim();
+  const chunk = String(input.chunk || "");
+  if (!draftId) throw new Error("draft_id is required");
+  if (!chunk) throw new Error("chunk is required");
+  if (chunk.length > MAX_HTML_CHUNK_CHARS) {
+    throw new Error(
+      `Chunk too large (${chunk.length} chars). Split into pieces of ≤${MAX_HTML_CHUNK_CHARS} characters.`,
+    );
+  }
+
+  const draft = await HtmlDraft.findOne({ draftId, userId: input.userId });
+  if (!draft) throw new Error("Draft not found or expired — call share_html_begin again");
+
+  const nextLen = String(draft.buffer || "").length + chunk.length;
+  if (nextLen > MAX_SHARE_HTML_CHARS) {
+    throw new Error(`Draft would exceed max size (${MAX_SHARE_HTML_CHARS} chars)`);
+  }
+
+  draft.buffer = `${draft.buffer || ""}${chunk}`;
+  draft.expiresAt = new Date(Date.now() + DRAFT_TTL_MS);
+  await draft.save();
+
+  return {
+    draftId,
+    bytesSoFar: draft.buffer.length,
+    remainingChars: MAX_SHARE_HTML_CHARS - draft.buffer.length,
+  };
+}
+
+export async function finishHtmlDraft(input: {
+  userId: string;
+  draftId: string;
+  origin?: string;
+  title?: string;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
+  await dbConnect();
+  const draftId = input.draftId.trim();
+  if (!draftId) throw new Error("draft_id is required");
+
+  const draft = await HtmlDraft.findOne({ draftId, userId: input.userId });
+  if (!draft) throw new Error("Draft not found or expired — call share_html_begin again");
+
+  const html = String(draft.buffer || "").trim();
+  if (!html) throw new Error("Draft is empty — append HTML chunks first");
+
+  const share = await createHtmlShare({
+    userId: input.userId,
+    projectId: draft.projectId ? String(draft.projectId) : undefined,
+    html,
+    title: input.title || draft.title || undefined,
+    origin: input.origin,
+    clientLogoUrl: input.clientLogoUrl || draft.clientLogoUrl || undefined,
+    clientName: input.clientName || draft.clientName || undefined,
+  });
+
+  await HtmlDraft.deleteOne({ _id: draft._id });
+  return share;
+}
+
+export async function createDataDashboardShare(input: {
+  userId: string;
+  projectId?: string;
+  origin?: string;
+  dashboard: DataDashboardInput;
+  clientLogoUrl?: string;
+  clientName?: string;
+}) {
+  const branding = await resolveClientBranding({
+    projectId: input.projectId,
+    clientLogoUrl: input.clientLogoUrl || input.dashboard.clientLogoUrl,
+    clientName: input.clientName || input.dashboard.clientName,
+  });
+  const html = renderDataDashboard({
+    ...input.dashboard,
+    clientLogoUrl: branding.clientLogoUrl,
+    clientName: branding.clientName,
+  });
+  return createHtmlShare({
+    userId: input.userId,
+    projectId: input.projectId,
+    html,
+    title: input.dashboard.title,
+    origin: input.origin,
+    clientLogoUrl: branding.clientLogoUrl,
+    clientName: branding.clientName,
+  });
 }
 
 export async function getHtmlShareByPublicId(publicId: string) {

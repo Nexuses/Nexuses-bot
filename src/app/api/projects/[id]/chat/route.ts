@@ -235,8 +235,11 @@ What the user sees (required):
 Formatting (required):
 - Write the final answer in clean Markdown. Use headings, short paragraphs, and bullet lists.
 - When showing 2 or more items with the same fields, use a Markdown table with a header row.
-- When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons.
-- For a live / public / shareable dashboard link: you MUST call share_html with the full HTML and paste ONLY the exact url from that tool result. NEVER invent or guess a /p/... URL — fake links 404.
+- When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons — but for LARGE dashboards do not dump the full table in the fence; use tools instead.
+- For a live / public / shareable dashboard link: NEVER invent or guess a /p/... URL — fake links 404.
+- Campaign / lead tables (any size, including 100–500+ rows): call share_data_dashboard with title, kpis, columns, and rows JSON, then paste ONLY the returned url.
+- Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste ONLY the returned url.
+- Small HTML only: share_html with the full document is fine.
 ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on).
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
@@ -308,9 +311,10 @@ ${providerGuide(integrations)}`;
           text: openingStatus(text || displayText, files.map((file) => file.name)),
         });
 
-        for (let round = 0; round < 12; round += 1) {
+        for (let round = 0; round < 24; round += 1) {
           if (round === 2) send({ type: "status", text: "Still working — this can take a little time…" });
-          if (round === 5) send({ type: "status", text: "Almost there. Finishing up…" });
+          if (round === 8) send({ type: "status", text: "Almost there. Finishing up…" });
+          if (round === 16) send({ type: "status", text: "Still assembling the page…" });
 
           activeTools = toolDefinitions(integrations);
           const reply = await withSlowHint(
@@ -343,7 +347,11 @@ ${providerGuide(integrations)}`;
               } catch (err) {
                 result = `Tool error: ${err instanceof Error ? err.message : "failed"}`;
               }
-              if (call.function.name === "share_html") {
+              if (
+                call.function.name === "share_html" ||
+                call.function.name === "share_html_finish" ||
+                call.function.name === "share_data_dashboard"
+              ) {
                 const url = parseShareUrlFromToolResult(result);
                 if (url) shareUrls.push(url);
               }

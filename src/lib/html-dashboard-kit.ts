@@ -130,6 +130,133 @@ function escapeHtml(value: string) {
     .replace(/"/g, "&quot;");
 }
 
+export type DataDashboardInput = {
+  title: string;
+  subtitle?: string;
+  kpis?: { label: string; value: string }[];
+  columns: string[];
+  rows: Array<Array<string | number | null | undefined>>;
+  chart?: {
+    type?: "bar" | "doughnut";
+    labels: string[];
+    values: number[];
+    title?: string;
+  };
+  clientLogoUrl?: string;
+  clientName?: string;
+};
+
+/** Server-built dashboard HTML so the model never has to emit huge table markup. */
+export function renderDataDashboard(input: DataDashboardInput) {
+  const title = (input.title || "Dashboard").trim() || "Dashboard";
+  const subtitle = (input.subtitle || "").trim();
+  const columns = (input.columns || []).map((c) => String(c || "").trim()).filter(Boolean);
+  const rows = Array.isArray(input.rows) ? input.rows : [];
+  if (!columns.length) throw new Error("columns are required");
+  if (rows.length > 5000) throw new Error("Too many rows (max 5000)");
+
+  const kpis = (input.kpis || [])
+    .slice(0, 8)
+    .map((k) => ({
+      label: String(k.label || "").trim(),
+      value: String(k.value ?? "").trim(),
+    }))
+    .filter((k) => k.label);
+
+  const clientLogo = (input.clientLogoUrl || "").trim();
+  const chart = input.chart;
+  const chartId = `nxChart_${Math.random().toString(36).slice(2, 9)}`;
+  const chartType = chart?.type === "doughnut" ? "doughnut" : "bar";
+
+  const kpiHtml = kpis.length
+    ? `<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">${kpis
+        .map(
+          (k) =>
+            `<div class="nx-card nx-stat"><div class="label">${escapeHtml(k.label)}</div><div class="value">${escapeHtml(k.value)}</div></div>`,
+        )
+        .join("")}</div>`
+    : "";
+
+  const chartHtml =
+    chart && chart.labels?.length && chart.values?.length
+      ? `<div class="nx-card p-6 mb-8">
+  ${chart.title ? `<h2 class="font-display text-xl mb-4">${escapeHtml(chart.title)}</h2>` : ""}
+  <canvas id="${chartId}" height="120"></canvas>
+</div>
+<script>
+(() => {
+  const el = document.getElementById("${chartId}");
+  if (!el || typeof Chart === "undefined") return;
+  new Chart(el, {
+    type: "${chartType}",
+    data: {
+      labels: ${JSON.stringify(chart.labels.map(String))},
+      datasets: [{
+        data: ${JSON.stringify(chart.values.map(Number))},
+        backgroundColor: ["#1e8a7a","#176f62","#4aa897","#8bbfb4","#c5ddd7","#efeae2"],
+        borderWidth: 0
+      }]
+    },
+    options: {
+      plugins: { legend: { display: ${chartType === "doughnut" ? "true" : "false"} } },
+      scales: ${chartType === "bar" ? "{ y: { beginAtZero: true } }" : "undefined"}
+    }
+  });
+})();
+</script>`
+      : "";
+
+  const headCells = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+  const bodyRows = rows
+    .map((row) => {
+      const cells = columns
+        .map((_, i) => {
+          const raw = Array.isArray(row) ? row[i] : "";
+          return `<td>${escapeHtml(raw == null ? "" : String(raw))}</td>`;
+        })
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en" ${KIT_MARK}>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${escapeHtml(title)}</title>
+${KIT_HEAD}
+</head>
+<body>
+<main class="nx-shell">
+  <header class="flex items-center justify-between gap-4 mb-8">
+    <img src="${NEXUSES_LOGO_URL}" alt="Nexuses" style="height:36px;width:auto;" />
+    ${
+      clientLogo
+        ? `<img src="${escapeHtml(clientLogo)}" alt="${escapeHtml(input.clientName || "Client")}" style="height:36px;width:auto;max-width:160px;object-fit:contain;" />`
+        : input.clientName
+          ? `<span class="text-sm text-muted">${escapeHtml(input.clientName)}</span>`
+          : ""
+    }
+  </header>
+  <h1 class="font-display text-4xl mb-2">${escapeHtml(title)}</h1>
+  ${subtitle ? `<p class="text-muted mb-8">${escapeHtml(subtitle)}</p>` : `<div class="mb-8"></div>`}
+  ${kpiHtml}
+  ${chartHtml}
+  <div class="nx-card overflow-x-auto">
+    <table>
+      <thead><tr>${headCells}</tr></thead>
+      <tbody>
+${bodyRows}
+      </tbody>
+    </table>
+  </div>
+  <p class="mt-4 text-xs text-muted">${rows.length} row${rows.length === 1 ? "" : "s"}</p>
+</main>
+</body>
+</html>`;
+}
+
 function looksStyled(html: string) {
   return (
     html.includes(KIT_MARK) ||
@@ -179,8 +306,13 @@ ${KIT_HEAD}
 }
 
 export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / shareable pages:
-- Output a COMPLETE HTML document in an \`\`\`html fence (DOCTYPE, html, head, body).
-- Use Tailwind via CDN (cdn.tailwindcss.com) plus Chart.js (cdn.jsdelivr.net/npm/chart.js) when charts help.
+- Prefer share_data_dashboard for campaign/lead reports with tables (pass title, kpis, columns, rows as JSON). The server builds the full HTML — do NOT emit hundreds of table rows yourself.
+- For custom one-off HTML that is SMALL (roughly under ~40 table rows or a short page): call share_html once with the full HTML, and optionally also show a short \`\`\`html preview fence.
+- For LARGE custom HTML (long tables, multi-section reports): NEVER put the full document in one share_html call or one fence (it truncates and breaks JSON). Instead:
+  1) share_html_begin
+  2) share_html_append repeatedly with chunks ≤12000 characters (send several appends per turn)
+  3) share_html_finish — then paste ONLY the returned url
+- Use Tailwind via CDN (cdn.tailwindcss.com) plus Chart.js when charts help (share_data_dashboard already includes both).
 - Fonts: Syne for headings, DM Sans for body (Google Fonts).
 - Palette: background #f6f3ee, text #1c1916, accent #1e8a7a, borders #ddd6cb. Avoid purple gradients, neon glow, and emoji decoration.
 - Brand: use the Nexuses logo image (NOT text-only "NEXUSES") at the top-left of the header:
@@ -188,5 +320,5 @@ export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / 
   Example: <img src="${NEXUSES_LOGO_URL}" alt="Nexuses" style="height:36px;width:auto;" />
   Put the project/client logo on the right when available. Do not invent another Nexuses logo URL.
 - Layout: one clear hero title + short subtitle, then a row of KPI stat cards, then one chart and/or one real HTML <table> (never markdown pipe tables inside HTML).
-- Make rows scannable; use rounded-3xl cards, soft shadow, generous padding. Mobile-friendly.
-- Prefer semantic HTML + Tailwind utility classes. No React. Inline a small <script> only for Chart.js.`;
+- Prefer semantic HTML + Tailwind utility classes. No React. Inline a small <script> only for Chart.js.
+- Never invent /p/... URLs. Never claim a size limit forces splitting into multiple dashboards when share_data_dashboard or chunked share_html_* can publish one page.`;

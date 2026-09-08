@@ -3,7 +3,7 @@ import type { ChatAttachment } from "@/types/chat";
 export const MAX_CHAT_FILES = 5;
 export const MAX_CHAT_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_EXTRACTED_CHARS = 40_000;
-export const MAX_CSV_CHARS = 120_000;
+export const MAX_CSV_CHARS = 400_000;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 const TEXT_EXT = new Set([
