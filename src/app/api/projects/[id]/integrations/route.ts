@@ -1,7 +1,9 @@
 import { jsonError } from "@/lib/api";
 import {
   displayProviderName,
+  isLikelyApiAuthRejection,
   looksLikeQueryApiKeyAuth,
+  normalizeBrevoApiKey,
   normalizeCustomBaseUrl,
   normalizeMcpUrl,
   parseAuthType,
@@ -38,7 +40,7 @@ export async function POST(request: Request, { params }: Params) {
   try {
     const body = await request.json();
     const provider = String(body.provider ?? "") as Provider;
-    const apiKey = String(body.apiKey ?? "").trim();
+    let apiKey = String(body.apiKey ?? "").trim();
     let authType = parseAuthType(body.authType);
     const name =
       provider === "other"
@@ -61,6 +63,10 @@ export async function POST(request: Request, { params }: Params) {
       );
     }
     if (!apiKey) return jsonError("API key is required");
+    if (provider === "brevo") {
+      apiKey = normalizeBrevoApiKey(apiKey);
+      if (!apiKey) return jsonError("API key is required");
+    }
     if (provider === "other" && name.length < 2) return jsonError("Give this API a name");
 
     const validated = await validateIntegration({ provider, apiKey, baseUrl, authType });
@@ -124,6 +130,14 @@ export async function POST(request: Request, { params }: Params) {
     return ok({ integration }, 201);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not save integration";
-    return jsonError(message.includes("401") || message.includes("403") ? "API key was rejected" : message, 400);
+    if (isLikelyApiAuthRejection(message)) {
+      return jsonError(
+        message.includes("Brevo")
+          ? message
+          : "API key was rejected. Check the key and paste only the raw token (no Bearer prefix).",
+        400,
+      );
+    }
+    return jsonError(message, 400);
   }
 }

@@ -25,12 +25,18 @@ async function mcpRequest(
   method: string,
   params?: Record<string, unknown>,
   sessionId?: string,
+  options?: { authHeader?: "bearer" | "api-key" },
 ) {
+  const authHeader = options?.authHeader || "bearer";
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
   };
+  if (authHeader === "api-key") {
+    headers["api-key"] = apiKey;
+  } else {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
 
   const res = await fetch(mcpUrl, {
@@ -72,31 +78,61 @@ async function mcpRequest(
 async function withMcpSession<T>(
   mcpUrl: string,
   apiKey: string,
-  run: (sessionId: string) => Promise<T>,
+  run: (sessionId: string, authHeader: "bearer" | "api-key") => Promise<T>,
 ) {
-  const init = await mcpRequest(mcpUrl, apiKey, "initialize", {
-    protocolVersion: "2024-11-05",
-    capabilities: {},
-    clientInfo: { name: "nexuses", version: "1.0.0" },
-  });
-  try {
-    await mcpRequest(mcpUrl, apiKey, "notifications/initialized", undefined, init.sessionId);
-  } catch {
-    // Some servers ignore the follow-up notification.
+  const modes: Array<"bearer" | "api-key"> = ["bearer", "api-key"];
+  let lastError: unknown;
+
+  for (const authHeader of modes) {
+    try {
+      const init = await mcpRequest(
+        mcpUrl,
+        apiKey,
+        "initialize",
+        {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "nexuses", version: "1.0.0" },
+        },
+        undefined,
+        { authHeader },
+      );
+      try {
+        await mcpRequest(
+          mcpUrl,
+          apiKey,
+          "notifications/initialized",
+          undefined,
+          init.sessionId,
+          { authHeader },
+        );
+      } catch {
+        // Some servers ignore the follow-up notification.
+      }
+      return await run(init.sessionId, authHeader);
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      const authFail = /\b401\b|unauthorized|invalid.*key|authentication/i.test(message);
+      if (!authFail) throw err;
+    }
   }
-  return run(init.sessionId);
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || "Brevo MCP auth failed"));
 }
 
 export async function validateBrevoMcp(apiKey: string, mcpUrl = BREVO_MCP_DEFAULT) {
   const url = mcpUrl || BREVO_MCP_DEFAULT;
-  await withMcpSession(url, apiKey, async () => ({ ok: true as const }));
+  const key = apiKey.trim();
+  if (!key) throw new Error("Brevo API key is required");
+  await withMcpSession(url, key, async () => ({ ok: true as const }));
   return { ok: true as const, mcpUrl: url };
 }
 
 export async function listBrevoMcpTools(apiKey: string, mcpUrl = BREVO_MCP_DEFAULT) {
   const url = mcpUrl || BREVO_MCP_DEFAULT;
-  return withMcpSession(url, apiKey, async (sessionId) => {
-    const listed = await mcpRequest(url, apiKey, "tools/list", {}, sessionId);
+  return withMcpSession(url, apiKey, async (sessionId, authHeader) => {
+    const listed = await mcpRequest(url, apiKey, "tools/list", {}, sessionId, { authHeader });
     const tools = ((listed.data as { tools?: McpTool[] } | undefined)?.tools || []) as McpTool[];
     return tools.map((tool) => ({
       name: tool.name,
@@ -166,13 +202,14 @@ export async function callBrevoMcpToolRaw(
   mcpUrl = BREVO_MCP_DEFAULT,
 ) {
   const url = mcpUrl || BREVO_MCP_DEFAULT;
-  return withMcpSession(url, apiKey, async (sessionId) => {
+  return withMcpSession(url, apiKey, async (sessionId, authHeader) => {
     const result = await mcpRequest(
       url,
       apiKey,
       "tools/call",
       { name: toolName, arguments: args },
       sessionId,
+      { authHeader },
     );
     return result.data ?? null;
   });

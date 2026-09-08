@@ -196,7 +196,7 @@ export function IntegrationsPanel({
                     }}
                   >
                     <Field
-                      label={item.provider === "brevo" ? "MCP key (or API key)" : "API key"}
+                      label={item.provider === "brevo" ? "Brevo API or MCP key" : "API key"}
                       type="password"
                       value={keys[item.provider] ?? ""}
                       onChange={(event) =>
@@ -204,6 +204,12 @@ export function IntegrationsPanel({
                       }
                       required
                     />
+                    {item.provider === "brevo" ? (
+                      <p className="text-xs text-muted">
+                        Paste only the key itself (no Bearer). Standard keys work for REST; MCP keys need
+                        “Create MCP server API key” enabled in Brevo → SMTP &amp; API.
+                      </p>
+                    ) : null}
                     <PrimaryButton type="submit" tone="sea" disabled={busy === item.provider}>
                       {busy === item.provider ? "Connecting..." : `Connect ${item.title}`}
                     </PrimaryButton>

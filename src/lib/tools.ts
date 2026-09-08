@@ -19,6 +19,7 @@ import {
   displayProviderName,
   looksLikeQueryApiKeyAuth,
   looksLikeRawAuthorizationAuth,
+  normalizeBrevoApiKey,
   normalizeCustomBaseUrl,
   normalizeMcpUrl,
   normalizeProvider,
@@ -27,6 +28,7 @@ import {
   resolveCustomAuthType,
   upsertIntegrationDoc,
   maskKey,
+  isLikelyApiAuthRejection,
 } from "@/lib/integrations";
 import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
@@ -1701,7 +1703,9 @@ export async function runTool(
       throw new Error("Cannot save integrations in this context");
     }
     const provider = normalizeProvider(String(args.provider || ""));
-    const apiKey = String(args.api_key || args.apiKey || "").trim();
+    let apiKey = String(args.api_key || args.apiKey || "").trim();
+    if (!apiKey) throw new Error("API key is required");
+    if (provider === "brevo") apiKey = normalizeBrevoApiKey(apiKey);
     if (!apiKey) throw new Error("API key is required");
     let authType = parseAuthType(args.auth_type || args.authType);
     const label = displayProviderName(provider, String(args.name || ""));
@@ -2312,14 +2316,36 @@ export async function validateIntegration(input: {
     return {};
   }
   if (input.provider === "brevo") {
+    const apiKey = normalizeBrevoApiKey(input.apiKey);
+    if (!apiKey) throw new Error("Brevo API key is required");
+
+    let restError: Error | null = null;
     try {
       await requestJson(`${BREVO}/v3/account`, {
-        headers: brevoHeaders(input.apiKey),
+        headers: brevoHeaders(apiKey),
       });
       return { mcpUrl: "" };
-    } catch {
-      await validateBrevoMcp(input.apiKey, BREVO_MCP_DEFAULT);
+    } catch (err) {
+      restError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    try {
+      await validateBrevoMcp(apiKey, BREVO_MCP_DEFAULT);
       return { mcpUrl: BREVO_MCP_DEFAULT };
+    } catch (mcpErr) {
+      const mcpMessage = mcpErr instanceof Error ? mcpErr.message : String(mcpErr);
+      const restMessage = restError?.message || "";
+      const restAuth = isLikelyApiAuthRejection(restMessage);
+      const mcpAuth = isLikelyApiAuthRejection(mcpMessage);
+      if (restAuth && mcpAuth) {
+        throw new Error(
+          "Brevo rejected this key. Paste only the raw key (no “Bearer” or “api-key:” prefix). Create a standard API key or an MCP key under Settings → SMTP & API → API Keys (enable “Create MCP server API key” for MCP).",
+        );
+      }
+      if (!restAuth && restError) {
+        throw new Error(`Could not reach Brevo API (${restMessage}). Check server network access to api.brevo.com.`);
+      }
+      throw new Error(`Brevo MCP validation failed: ${mcpMessage}`);
     }
   }
   if (input.provider === "lemlist") {

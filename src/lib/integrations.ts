@@ -95,6 +95,27 @@ export function normalizeMcpUrl(raw: string) {
   }
 }
 
+/** Strip Bearer / api-key prefixes and invisible chars people paste from Brevo configs. */
+export function normalizeBrevoApiKey(raw: string) {
+  let key = String(raw || "")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim();
+  key = key.replace(/^\s*authorization\s*:\s*/i, "").trim();
+  key = key.replace(/^bearer\s+/i, "").trim();
+  key = key.replace(/^\s*api[_-]?key\s*[:=]\s*/i, "").trim();
+  return key;
+}
+
+export function isLikelyApiAuthRejection(message: string) {
+  const text = message || "";
+  if (/\b401\b/.test(text)) return true;
+  if (/unauthorized/i.test(text) && !/cloudflare|<!doctype|html>/i.test(text)) return true;
+  // Do not treat generic 403/proxy/WAF pages as an invalid API key.
+  return false;
+}
+
 export { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 
 export async function upsertIntegrationDoc(
