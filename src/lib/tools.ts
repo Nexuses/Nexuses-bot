@@ -962,7 +962,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "start_campaign_automation",
         description:
-          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal, Nexuses Outreach 1-1 (built-in), AND other custom APIs. Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. Lemlist/Brevo: source + campaign + attio_list. Unified Portal / Outreach 1-1: source/integration = connected name, campaign, attio_list — poll_path NOT required. Other custom APIs: pass recipe poll_path + field mapping.",
+          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal, Nexuses Outreach 1-1 (built-in), AND other custom APIs. Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. Lemlist/Brevo: source + campaign + attio_list. Unified Portal single campaign: source/integration + campaign + attio_list. Unified Portal watch-all (auto-detect new campaigns): watch_all true or campaign \"*\" + attio_list — registers webhooks + polls updatedSince. Other custom APIs: pass recipe poll_path + field mapping.",
         parameters: {
           type: "object",
           properties: {
@@ -1048,6 +1048,11 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               enum: ["drip", "oneone"],
               description:
                 "Unified Portal only: drip vs oneone (ids are separate per kind). Optional — bot searches both if omitted.",
+            },
+            watch_all: {
+              type: "boolean",
+              description:
+                "Unified Portal only: watch EVERY new/updated campaign (registers webhook + polls updatedSince). Pass campaign as \"*\" or set watch_all true. Requires Attio list.",
             },
           },
           required: ["source", "campaign", "attio_list"],
@@ -1750,7 +1755,12 @@ export async function runTool(
 
     const campaign = String(args.campaign || args.campaignName || "").trim();
     const attioList = String(args.attio_list || args.attioList || args.list || "").trim();
-    if (!campaign) throw new Error("Campaign name is required");
+    const watchAllEarly =
+      args.watch_all === true ||
+      args.watchAll === true ||
+      campaign === "*" ||
+      /^all$/i.test(campaign);
+    if (!campaign && !watchAllEarly) throw new Error("Campaign name is required");
     if (!attioList) throw new Error("Attio list name is required");
 
     const pollPath = String(args.poll_path || args.pollPath || "").trim();
@@ -1790,10 +1800,13 @@ export async function runTool(
               ? completedValuesRaw.map((item) => String(item || "").trim()).filter(Boolean)
               : undefined,
             campaignKind: kindRaw === "drip" || kindRaw === "oneone" ? kindRaw : undefined,
+            watchAll: watchAllEarly,
           }
         : undefined;
 
-    if (sourceProvider === "other" && !pollPath) {
+    const watchAll = watchAllEarly;
+
+    if (sourceProvider === "other" && !pollPath && !watchAll) {
       const matched = integrations.find(
         (item) =>
           item.provider === "other" &&
@@ -1816,19 +1829,25 @@ export async function runTool(
       }
     }
 
-    context.onStatus?.(`Starting automatic updates for ${campaign}…`);
+    if (recipe && watchAll) {
+      recipe.pollPath = "/api/campaigns";
+      recipe.method = "GET";
+    }
+
+    context.onStatus?.(`Starting automatic updates for ${watchAll ? "all campaigns" : campaign}…`);
     const automation = await startCampaignAutomation({
       userId: context.userId,
       projectId: context.projectId,
       sourceProvider,
       sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
-      campaignName: campaign,
+      campaignName: campaign || (watchAll ? "*" : ""),
       attioList,
       stageOpen: String(args.stage_open || args.stageOpen || "open"),
       stageClick: String(args.stage_click || args.stageClick || "click"),
       stageReply: String(args.stage_reply || args.stageReply || "hot"),
       intervalMinutes: Number(args.interval_minutes || args.intervalMinutes) || 2,
       recipe,
+      watchAll,
     });
     const fromLabel =
       automation.sourceProvider === "other"
@@ -1837,7 +1856,9 @@ export async function runTool(
     return clip({
       ok: true,
       automation,
-      note: `Automatic update is running. Attio list "${automation.attioList}" will keep syncing from ${fromLabel} · "${automation.campaignName}" until the source completes (or you stop it).`,
+      note: automation.watchAll
+        ? `Watch mode is running for ${fromLabel} → Attio “${automation.attioList}”. New campaigns are detected via webhooks + updatedSince polling; opens/clicks sync into Attio until you stop it.`
+        : `Automatic update is running. Attio list "${automation.attioList}" will keep syncing from ${fromLabel} · "${automation.campaignName}" until the source completes (or you stop it).`,
     });
   }
 

@@ -16,6 +16,8 @@ export type SyncRecipe = {
   completedValues?: string[];
   /** Unified Portal: drip | oneone */
   campaignKind?: "drip" | "oneone" | string;
+  /** Unified Portal: watch every campaign (updatedSince + webhooks). */
+  watchAll?: boolean;
 };
 
 export type AutomationSourceProvider = "lemlist" | "brevo" | "other";
@@ -34,6 +36,8 @@ export type AutomationDTO = {
   stageReply: string;
   intervalMinutes: number;
   recipe: SyncRecipe | null;
+  watchAll: boolean;
+  webhookEnabled: boolean;
   nextRunAt: string;
   lastRunAt: string;
   lastSummary: string;
@@ -45,7 +49,7 @@ function serializeRecipe(raw: unknown): SyncRecipe | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const pollPath = String(r.pollPath || "").trim();
-  if (!pollPath && !r.campaignKind) return null;
+  if (!pollPath && !r.campaignKind && !r.watchAll) return null;
   const stageMapRaw = r.stageMap;
   let stageMap: Record<string, string> | undefined;
   if (stageMapRaw && typeof stageMapRaw === "object") {
@@ -71,6 +75,7 @@ function serializeRecipe(raw: unknown): SyncRecipe | null {
       ? r.completedValues.map((item) => String(item || "").trim()).filter(Boolean)
       : undefined,
     campaignKind: kind === "drip" || kind === "oneone" ? kind : undefined,
+    watchAll: Boolean(r.watchAll),
   };
 }
 
@@ -88,6 +93,8 @@ export function serializeAutomation(doc: {
   stageReply?: string;
   intervalMinutes?: number;
   recipe?: unknown;
+  watchAll?: boolean;
+  webhookToken?: string;
   nextRunAt?: Date;
   lastRunAt?: Date;
   lastSummary?: string;
@@ -112,6 +119,8 @@ export function serializeAutomation(doc: {
     stageReply: doc.stageReply || "hot",
     intervalMinutes: doc.intervalMinutes || 2,
     recipe: serializeRecipe(doc.recipe),
+    watchAll: Boolean(doc.watchAll || (doc.recipe as { watchAll?: boolean } | undefined)?.watchAll),
+    webhookEnabled: Boolean(doc.webhookToken),
     nextRunAt: doc.nextRunAt ? new Date(doc.nextRunAt).toISOString() : "",
     lastRunAt: doc.lastRunAt ? new Date(doc.lastRunAt).toISOString() : "",
     lastSummary: doc.lastSummary || "",

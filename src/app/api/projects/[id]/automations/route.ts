@@ -58,7 +58,12 @@ export async function POST(request: Request, { params }: Params) {
 
     const campaignName = String(body.campaignName || body.campaign || "").trim();
     const attioList = String(body.attioList || body.list || "").trim();
-    if (!campaignName) return jsonError("campaignName is required");
+    const watchAll =
+      body.watchAll === true ||
+      body.watch_all === true ||
+      campaignName === "*" ||
+      /^all$/i.test(campaignName);
+    if (!campaignName && !watchAll) return jsonError("campaignName is required");
     if (!attioList) return jsonError("attioList is required");
 
     let recipe: SyncRecipe | undefined;
@@ -73,15 +78,18 @@ export async function POST(request: Request, { params }: Params) {
       const looksOutreach = /outreach|1-?1\s*tool|nexuses\s*1-?1|outreachcampaign\.nexuses/i.test(
         sourceIntegrationName,
       );
-      if (!pollPath && !looksUnified && !looksOutreach) {
+      if (!pollPath && !looksUnified && !looksOutreach && !watchAll) {
         return jsonError("pollPath is required for custom connector sync");
       }
       const stageMapRaw = body.stageMap || body.stage_map || body.recipe?.stageMap;
       recipe = {
-        pollPath: pollPath || "/api/campaigns/process-due",
+        pollPath: pollPath || (watchAll ? "/api/campaigns" : "/api/campaigns/process-due"),
         method:
           String(
-            body.pollMethod || body.poll_method || body.recipe?.method || (pollPath ? "GET" : "POST"),
+            body.pollMethod ||
+              body.poll_method ||
+              body.recipe?.method ||
+              (watchAll || !pollPath ? (watchAll ? "GET" : "POST") : "GET"),
           ).toUpperCase() === "POST"
             ? "POST"
             : "GET",
@@ -114,6 +122,7 @@ export async function POST(request: Request, { params }: Params) {
             ).filter(Boolean)
           : undefined,
         campaignKind: kindRaw === "drip" || kindRaw === "oneone" ? kindRaw : undefined,
+        watchAll,
       };
     }
 
@@ -122,13 +131,14 @@ export async function POST(request: Request, { params }: Params) {
       projectId: id,
       sourceProvider,
       sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
-      campaignName,
+      campaignName: campaignName || (watchAll ? "*" : ""),
       attioList,
       stageOpen: String(body.stageOpen || "open"),
       stageClick: String(body.stageClick || "click"),
       stageReply: String(body.stageReply || "hot"),
       intervalMinutes: Number(body.intervalMinutes) || 2,
       recipe,
+      watchAll,
     });
     return ok({ automation }, 201);
   } catch (err) {

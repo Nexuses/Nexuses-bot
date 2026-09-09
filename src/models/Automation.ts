@@ -31,6 +31,12 @@ const AutomationSchema = new Schema(
     intervalMinutes: { type: Number, default: 2, min: 1, max: 60 },
     /** Poll recipe for custom / other connectors. */
     recipe: { type: Schema.Types.Mixed, default: undefined },
+    /** Watch all Unified Portal campaigns (updatedSince + webhooks). */
+    watchAll: { type: Boolean, default: false },
+    lastSeenAt: { type: Date },
+    webhookToken: { type: String, default: "", index: true },
+    webhookSecret: { type: String, default: "" },
+    portalWebhookId: { type: String, default: "" },
     nextRunAt: { type: Date, default: Date.now, index: true },
     lastRunAt: { type: Date },
     lastSummary: { type: String, default: "" },

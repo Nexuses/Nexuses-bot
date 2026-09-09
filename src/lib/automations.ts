@@ -22,6 +22,13 @@ import {
   resolveUnifiedPortalCampaign,
 } from "@/lib/unified-portal";
 import {
+  deleteUnifiedPortalWebhook,
+  listUnifiedCampaignsSince,
+  makeWebhookReceiveToken,
+  registerUnifiedPortalWebhook,
+  syncUnifiedCampaignEngagement,
+} from "@/lib/unified-webhooks";
+import {
   collectOutreachPeople,
   isNexusesOutreach,
   resolveOutreachCampaign,
@@ -539,6 +546,8 @@ async function syncUnifiedPortalSource(job: {
   stageOpen: string;
   stageClick: string;
   stageReply: string;
+  watchAll?: boolean;
+  lastSeenAt?: Date | null;
   recipe?: SyncRecipe | null;
 }) {
   const integration = await getCustomIntegration(
@@ -548,6 +557,52 @@ async function syncUnifiedPortalSource(job: {
   );
   const attio = await getIntegration(job.userId, job.projectId, "attio");
   const list = await resolveAttioList(attio.apiKey, job.attioList);
+
+  if (job.watchAll || job.campaignName === "*" || /^all$/i.test(job.campaignName)) {
+    const dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
+    const since = job.lastSeenAt
+      ? new Date(job.lastSeenAt.getTime() - 60_000).toISOString()
+      : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const campaigns = await listUnifiedCampaignsSince({
+      apiKey: integration.apiKey,
+      baseUrl: integration.baseUrl,
+      updatedSince: since,
+    });
+    const active = campaigns.filter((item) =>
+      /^(scheduled|sending|sent|paused)$/i.test(item.status),
+    );
+
+    let updated = 0;
+    let failed = 0;
+    let scanned = 0;
+    for (const campaign of active.slice(0, 20)) {
+      scanned += 1;
+      const { people } = await syncUnifiedCampaignEngagement({
+        apiKey: integration.apiKey,
+        baseUrl: integration.baseUrl,
+        campaignId: campaign.id,
+        kind: campaign.kind,
+        stageOpen: job.stageOpen || "open",
+        stageClick: job.stageClick || "click",
+        stageReply: job.stageReply || "unsubscribed",
+      });
+      for (const person of people.slice(0, 500)) {
+        try {
+          await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+          updated += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+
+    return {
+      completed: false,
+      campaignStatus: "watching",
+      lastSeenAt: new Date(),
+      summary: `Unified Portal watch → ${list.name}: process-due ×${dueRounds}; scanned ${scanned} campaign(s) since ${since.slice(0, 16)}; synced ${updated} people${failed ? `; ${failed} failed` : ""}. Webhooks + updatedSince keep discovering new launches.`,
+    };
+  }
 
   // Keep portal sends moving even when nobody has the report page open.
   const dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
@@ -655,6 +710,8 @@ async function syncRecipeSource(job: {
   stageOpen: string;
   stageClick?: string;
   stageReply?: string;
+  watchAll?: boolean;
+  lastSeenAt?: Date | null;
   recipe: SyncRecipe | null | undefined;
 }) {
   const integration = await getCustomIntegration(
@@ -673,6 +730,8 @@ async function syncRecipeSource(job: {
       stageOpen: job.stageOpen,
       stageClick: job.stageClick || "click",
       stageReply: job.stageReply || "unsubscribed",
+      watchAll: job.watchAll || job.recipe?.watchAll,
+      lastSeenAt: job.lastSeenAt,
       recipe: job.recipe,
     });
   }
@@ -722,7 +781,12 @@ export async function runAutomationById(automationId: string) {
   if (!job || job.status !== "running") return null;
 
   try {
-    let result: { completed: boolean; campaignStatus: string; summary: string };
+    let result: {
+      completed: boolean;
+      campaignStatus: string;
+      summary: string;
+      lastSeenAt?: Date;
+    };
     if (job.sourceProvider === "lemlist") {
       result = await syncLemlistCampaign({
         userId: String(job.userId),
@@ -753,6 +817,8 @@ export async function runAutomationById(automationId: string) {
         stageOpen: job.stageOpen,
         stageClick: job.stageClick,
         stageReply: job.stageReply,
+        watchAll: Boolean(job.watchAll),
+        lastSeenAt: job.lastSeenAt || null,
         recipe: job.recipe as SyncRecipe | undefined,
       });
     }
@@ -761,7 +827,10 @@ export async function runAutomationById(automationId: string) {
     job.runCount = (job.runCount || 0) + 1;
     job.lastSummary = result.summary;
     job.error = "";
-    if (result.completed) {
+    if ("lastSeenAt" in result && result.lastSeenAt instanceof Date) {
+      job.lastSeenAt = result.lastSeenAt;
+    }
+    if (result.completed && !job.watchAll) {
       job.status = "completed";
       job.lastSummary = `${result.summary} Source is complete — automatic updates stopped.`;
     } else {
@@ -819,6 +888,7 @@ export async function startCampaignAutomation(input: {
   stageReply?: string;
   intervalMinutes?: number;
   recipe?: SyncRecipe | null;
+  watchAll?: boolean;
 }) {
   await dbConnect();
   ensureAutomationRunner();
@@ -829,6 +899,9 @@ export async function startCampaignAutomation(input: {
   let sourceProvider = input.sourceProvider;
   let sourceIntegrationName = String(input.sourceIntegrationName || "").trim();
   let recipe: SyncRecipe | undefined;
+  let watchAll = Boolean(input.watchAll || input.recipe?.watchAll);
+  const campaignNameRaw = String(input.campaignName || "").trim();
+  if (campaignNameRaw === "*" || /^all$/i.test(campaignNameRaw)) watchAll = true;
 
   if (sourceProvider === "lemlist") {
     await getIntegration(input.userId, input.projectId, "lemlist");
@@ -844,23 +917,37 @@ export async function startCampaignAutomation(input: {
     if (isUnifiedPortal(custom)) {
       const kind = String(input.recipe?.campaignKind || "").toLowerCase();
       recipe = {
-        pollPath: "/api/campaigns/process-due",
-        method: "POST",
+        pollPath: watchAll ? "/api/campaigns" : "/api/campaigns/process-due",
+        method: watchAll ? "GET" : "POST",
         campaignKind: kind === "drip" || kind === "oneone" ? kind : undefined,
+        watchAll,
       };
     } else if (isNexusesOutreach(custom)) {
+      if (watchAll) {
+        throw new Error(
+          "Watch-all mode is only supported for Unified Portal right now. Pass a specific Outreach campaign name.",
+        );
+      }
       recipe = {
         pollPath: "/api/v1/campaigns",
         method: "GET",
       };
     } else {
+      if (watchAll) {
+        throw new Error("watch_all requires Unified Portal");
+      }
       recipe = normalizeRecipe(input.recipe);
     }
   }
 
+  const campaignName = watchAll ? "*" : campaignNameRaw;
+  if (!campaignName) throw new Error("Campaign name is required");
+
   const label =
     sourceProvider === "other" ? sourceIntegrationName || "custom API" : sourceProvider;
-  const title = `Auto-update Attio from ${label} · ${input.campaignName}`;
+  const title = watchAll
+    ? `Watch Unified Portal → Attio “${input.attioList}”`
+    : `Auto-update Attio from ${label} · ${campaignName}`;
 
   const existing = await Automation.findOne({
     userId: input.userId,
@@ -868,7 +955,7 @@ export async function startCampaignAutomation(input: {
     type: "campaign_to_attio",
     sourceProvider,
     sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : "",
-    campaignName: input.campaignName,
+    campaignName,
     attioList: input.attioList,
     status: "running",
   });
@@ -883,6 +970,29 @@ export async function startCampaignAutomation(input: {
       ? 1
       : 2;
 
+  let webhookToken = "";
+  let webhookSecret = "";
+  let portalWebhookId = "";
+  let webhookNote = "";
+
+  if (watchAll && isUnifiedPortal({ name: sourceIntegrationName })) {
+    const custom = await getCustomIntegration(input.userId, input.projectId, sourceIntegrationName);
+    webhookToken = makeWebhookReceiveToken();
+    try {
+      const registered = await registerUnifiedPortalWebhook({
+        apiKey: custom.apiKey,
+        baseUrl: custom.baseUrl,
+        receiveToken: webhookToken,
+      });
+      webhookSecret = registered.secret;
+      portalWebhookId = registered.portalWebhookId;
+      webhookNote = ` Webhook registered at ${registered.url}.`;
+    } catch (err) {
+      webhookToken = "";
+      webhookNote = ` Webhook skipped: ${err instanceof Error ? err.message : "could not register"}. Polling updatedSince still runs.`;
+    }
+  }
+
   const job = await Automation.create({
     userId: input.userId,
     projectId: input.projectId,
@@ -891,7 +1001,7 @@ export async function startCampaignAutomation(input: {
     title,
     sourceProvider,
     sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : "",
-    campaignName: input.campaignName.trim(),
+    campaignName,
     attioList: input.attioList.trim(),
     stageOpen: input.stageOpen || "open",
     stageClick: input.stageClick || "click",
@@ -901,11 +1011,20 @@ export async function startCampaignAutomation(input: {
       60,
     ),
     recipe: sourceProvider === "other" ? recipe : undefined,
+    watchAll,
+    lastSeenAt: watchAll ? new Date() : undefined,
+    webhookToken,
+    webhookSecret,
+    portalWebhookId,
     nextRunAt: new Date(),
   });
 
   const first = await runAutomationById(String(job._id));
-  return first || serializeAutomation(job);
+  const serialized = first || serializeAutomation(job);
+  if (webhookNote) {
+    return { ...serialized, lastSummary: `${serialized.lastSummary || ""}${webhookNote}`.trim() };
+  }
+  return serialized;
 }
 
 export async function stopAutomation(input: {
@@ -927,16 +1046,122 @@ export async function stopAutomation(input: {
       "i",
     );
   }
-  const job = await Automation.findOneAndUpdate(
-    filter,
-    {
-      status: "stopped",
-      lastSummary: "Stopped by user. Automatic updates are no longer running.",
-    },
-    { new: true },
-  );
+  const job = await Automation.findOne(filter);
   if (!job) throw new Error("No running automation found to stop");
+
+  if (job.portalWebhookId && job.sourceIntegrationName) {
+    try {
+      const custom = await getCustomIntegration(
+        String(job.userId),
+        String(job.projectId),
+        job.sourceIntegrationName,
+      );
+      await deleteUnifiedPortalWebhook({
+        apiKey: custom.apiKey,
+        baseUrl: custom.baseUrl,
+        portalWebhookId: job.portalWebhookId,
+      });
+    } catch {
+      // continue stopping even if revoke fails
+    }
+  }
+
+  job.status = "stopped";
+  job.lastSummary = "Stopped by user. Automatic updates are no longer running.";
+  job.webhookToken = "";
+  job.webhookSecret = "";
+  job.portalWebhookId = "";
+  await job.save();
   return serializeAutomation(job);
+}
+
+/** Apply a verified Unified Portal webhook to matching watch/campaign jobs. */
+export async function handleUnifiedWebhookToken(input: {
+  token: string;
+  rawBody: string;
+  signatureHeader: string | null;
+}) {
+  await dbConnect();
+  const job = await Automation.findOne({
+    webhookToken: input.token,
+    status: "running",
+  });
+  if (!job?.webhookSecret) return { ok: false, error: "Unknown webhook" as const };
+
+  const { verifyUnifiedWebhookSignature, peopleFromUnifiedWebhookEvent } = await import(
+    "@/lib/unified-webhooks"
+  );
+  if (
+    !verifyUnifiedWebhookSignature({
+      rawBody: input.rawBody,
+      signatureHeader: input.signatureHeader,
+      secret: job.webhookSecret,
+    })
+  ) {
+    return { ok: false, error: "Invalid signature" as const };
+  }
+
+  let payload: import("@/lib/unified-webhooks").UnifiedWebhookPayload = {};
+  try {
+    payload = JSON.parse(input.rawBody) as import("@/lib/unified-webhooks").UnifiedWebhookPayload;
+  } catch {
+    return { ok: false, error: "Invalid JSON" as const };
+  }
+
+  const type = String(payload.type || "").toLowerCase();
+  const attio = await getIntegration(String(job.userId), String(job.projectId), "attio");
+  const list = await resolveAttioList(attio.apiKey, job.attioList);
+  const integration = await getCustomIntegration(
+    String(job.userId),
+    String(job.projectId),
+    job.sourceIntegrationName,
+  );
+
+  let updated = 0;
+  if (type === "send.opened" || type === "send.clicked") {
+    const people = peopleFromUnifiedWebhookEvent(payload, {
+      open: job.stageOpen || "open",
+      click: job.stageClick || "click",
+    });
+    for (const person of people) {
+      try {
+        await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+        updated += 1;
+      } catch {
+        // continue
+      }
+    }
+  } else if (type === "campaign.created" || type === "campaign.launched") {
+    const campaignId = String(payload.data?.campaignId || "").trim();
+    const kind = String(payload.data?.kind || "drip").toLowerCase() === "oneone" ? "oneone" : "drip";
+    if (campaignId) {
+      const { people } = await syncUnifiedCampaignEngagement({
+        apiKey: integration.apiKey,
+        baseUrl: integration.baseUrl,
+        campaignId,
+        kind,
+        stageOpen: job.stageOpen || "open",
+        stageClick: job.stageClick || "click",
+        stageReply: job.stageReply || "unsubscribed",
+      });
+      for (const person of people.slice(0, 500)) {
+        try {
+          await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+          updated += 1;
+        } catch {
+          // continue
+        }
+      }
+    } else {
+      await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 4);
+    }
+  }
+
+  job.lastRunAt = new Date();
+  job.lastSummary = `Webhook ${type || "event"}: updated ${updated} in Attio “${list.name}”.`;
+  job.error = "";
+  await job.save();
+  return { ok: true as const, updated, type };
 }
 
 export async function listAutomations(userId: string, projectId: string) {

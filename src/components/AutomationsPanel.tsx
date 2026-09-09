@@ -102,6 +102,16 @@ export function AutomationsPanel({
                               aria-hidden
                             />
                             {item.title || item.campaignName}
+                            {item.watchAll ? (
+                              <span className="rounded-full border border-sea/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-sea">
+                                watch all
+                              </span>
+                            ) : null}
+                            {item.webhookEnabled ? (
+                              <span className="rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted">
+                                webhook
+                              </span>
+                            ) : null}
                           </p>
                           <p className="mt-1 text-xs text-muted">
                             {sourceLabel(item)} · {item.campaignName} → Attio “{item.attioList}”

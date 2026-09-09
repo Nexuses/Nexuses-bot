@@ -18,9 +18,9 @@ export const KNOWN_CUSTOM_APIS: KnownCustomApi[] = [
     authType: "bearer",
     docsUrl: "https://unified.nexuses.xyz/portal/integrations",
     limits:
-      "Auth: Authorization Bearer up_live_… project API key (Integrations), or portal cookie. Always pass ?kind=drip|oneone on campaign id routes — drip #1 and 1-1 #1 are separate. Sends only advance while POST /api/campaigns/process-due is called (portal UI polls ~3s; Nexuses bot automation can drive this in the background). Public report links /r/{token} need no auth.",
+      "Auth: Authorization Bearer up_live_… project API key (Integrations). GET /api/auth/me is cookie-only — do not use Bearer there. Always pass ?kind=drip|oneone on campaign id routes. Sends only advance while POST /api/campaigns/process-due is called (no cron). Prefer webhooks (POST /api/integrations/webhooks) for campaign.created/launched and send.opened/clicked; fallback poll GET /api/campaigns?updatedSince=ISO. Portal marketing automations live at /api/automations (separate from Nexuses-bot Attio sync jobs).",
     pathHints:
-      "Campaigns: GET/POST /api/campaigns?kind=, GET/PATCH/DELETE /api/campaigns/{id}?kind=, POST /api/campaigns/launch, POST /api/campaigns/process-due, GET /api/campaigns/stats, GET /api/campaigns/{id}/recipients?filter=audience|delivered|opens|clicks|unsubscribes&kind=, POST /api/campaigns/{id}/share?kind=. CRM: GET /api/crm/contacts, GET /api/crm/lists, POST /api/crm/lists. SMTP: GET/POST /api/smtp/senders. Keys: GET/POST /api/integrations/keys.",
+      "Campaigns: GET/POST /api/campaigns?kind=&updatedSince=, GET/PATCH/DELETE /api/campaigns/{id}?kind=, POST /api/campaigns/launch, POST /api/campaigns/process-due, GET /api/campaigns/stats, GET /api/campaigns/{id}/recipients?filter=&kind=, POST /api/campaigns/{id}/share?kind=. Automations: GET/POST /api/automations, PATCH/DELETE /api/automations/{id}. Webhooks: GET/POST /api/integrations/webhooks, DELETE /api/integrations/webhooks/{id}. CRM: /api/crm/contacts, /api/crm/lists. SMTP: /api/smtp/senders. Keys: /api/integrations/keys.",
   },
   {
     match: /outreach|1-?1\s*tool|nexuses\s*1-?1|outreachcampaign\.nexuses/i,
