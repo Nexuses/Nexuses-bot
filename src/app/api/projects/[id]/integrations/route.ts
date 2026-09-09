@@ -1,8 +1,6 @@
 import { jsonError } from "@/lib/api";
 import {
   displayProviderName,
-  isBrevoIpAuthorizationError,
-  isLikelyApiAuthRejection,
   looksLikeQueryApiKeyAuth,
   normalizeBrevoApiKey,
   normalizeCustomBaseUrl,
@@ -128,20 +126,15 @@ export async function POST(request: Request, { params }: Params) {
     const { apiKey: _apiKey, restApiKey: _rest, ...integration } = saved as typeof saved & {
       restApiKey?: string;
     };
-    return ok({ integration }, 201);
+    return ok(
+      {
+        integration,
+        warning: validated.warning || null,
+      },
+      201,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not save integration";
-    if (isBrevoIpAuthorizationError(message) || message.includes("Authorized IPs")) {
-      return jsonError(message, 400);
-    }
-    if (isLikelyApiAuthRejection(message)) {
-      return jsonError(
-        message.includes("Brevo")
-          ? message
-          : "API key was rejected. Check the key and paste only the raw token (no Bearer prefix).",
-        400,
-      );
-    }
     return jsonError(message, 400);
   }
 }

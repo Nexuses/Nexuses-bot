@@ -15,7 +15,7 @@ const CATALOG: {
     provider: "brevo",
     title: "Brevo",
     blurb:
-      "MCP key for campaigns; add a normal API key too for who opened/clicked (same connection)",
+      "Paste a standard API key (xkeysib-…) or MCP key. Connect saves the key even if Brevo IP checks block live verify.",
   },
   { provider: "lemlist", title: "Lemlist", blurb: "Outreach campaigns, leads, activity" },
   {
@@ -38,6 +38,7 @@ export function IntegrationsPanel({
   onClose: () => void;
 }) {
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [otherName, setOtherName] = useState("");
@@ -63,6 +64,7 @@ export function IntegrationsPanel({
   ) {
     const key = (apiKey ?? keys[provider] ?? "").trim();
     setError("");
+    setNotice("");
     setBusy(provider + (name ?? ""));
     const res = await fetch(`/api/projects/${projectId}/integrations`, {
       method: "POST",
@@ -80,6 +82,7 @@ export function IntegrationsPanel({
       setError(data.error ?? "Could not connect");
       return;
     }
+    if (data.warning) setNotice(String(data.warning));
     onChange([
       ...integrations.filter((item) =>
         provider === "other"
@@ -138,6 +141,11 @@ export function IntegrationsPanel({
         {error ? (
           <p className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">
             {error}
+          </p>
+        ) : null}
+        {notice ? (
+          <p className="mb-4 rounded-xl border border-brass/30 bg-brass/10 px-3 py-2 text-sm text-paper">
+            {notice}
           </p>
         ) : null}
 

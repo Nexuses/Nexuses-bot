@@ -5,6 +5,8 @@ import {
   stopAutomation,
 } from "@/lib/automations";
 import { brevoPeopleByEvent } from "@/lib/brevo-recipients";
+import { resolveBrevoConnection } from "@/lib/brevo-connect";
+import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import {
   callBrevoMcpTool,
   filterBrevoMcpTools,
@@ -14,7 +16,6 @@ import {
   summarizeBrevoCampaigns,
   validateBrevoMcp,
 } from "@/lib/brevo-mcp";
-import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import {
   displayProviderName,
   looksLikeQueryApiKeyAuth,
@@ -28,9 +29,6 @@ import {
   resolveCustomAuthType,
   upsertIntegrationDoc,
   maskKey,
-  isLikelyApiAuthRejection,
-  isBrevoIpAuthorizationError,
-  brevoKeyHint,
 } from "@/lib/integrations";
 import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
@@ -1816,8 +1814,10 @@ export async function runTool(
       mode,
       mcpUrl: saved.mcpUrl || null,
       hasRestApiKey: Boolean(saved.hasRestApiKey),
-      note:
-        mode === "mcp+rest"
+      warning: validated.warning || null,
+      note: validated.warning
+        ? validated.warning
+        : mode === "mcp+rest"
           ? "Brevo MCP + REST API key are both saved on one connection. Campaign lists use MCP; who opened/clicked uses REST export."
           : mode === "mcp"
             ? "Brevo is connected via MCP. For who opened/clicked a campaign, also paste a standard Brevo API key (not MCP-only) and say connect Brevo — we will add it alongside MCP."
@@ -2310,7 +2310,7 @@ export async function validateIntegration(input: {
   apiKey: string;
   baseUrl?: string;
   authType?: AuthType;
-}): Promise<{ mcpUrl?: string }> {
+}): Promise<{ mcpUrl?: string; warning?: string }> {
   if (input.provider === "attio") {
     await requestJson(`${ATTIO}/v2/objects`, {
       headers: attioHeaders(input.apiKey),
@@ -2318,58 +2318,8 @@ export async function validateIntegration(input: {
     return {};
   }
   if (input.provider === "brevo") {
-    const apiKey = normalizeBrevoApiKey(input.apiKey);
-    if (!apiKey) throw new Error("Brevo API key is required");
-    if (/^xsmtpsib-/i.test(apiKey)) {
-      throw new Error(
-        "That looks like a Brevo SMTP key, not an API key. Create an API key under Settings → SMTP & API → API Keys.",
-      );
-    }
-
-    let restError: Error | null = null;
-    try {
-      await requestJson(`${BREVO}/v3/account`, {
-        headers: brevoHeaders(apiKey),
-      });
-      return { mcpUrl: "" };
-    } catch (err) {
-      restError = err instanceof Error ? err : new Error(String(err));
-    }
-
-    try {
-      await validateBrevoMcp(apiKey, BREVO_MCP_DEFAULT);
-      return { mcpUrl: BREVO_MCP_DEFAULT };
-    } catch (mcpErr) {
-      const mcpMessage = mcpErr instanceof Error ? mcpErr.message : String(mcpErr);
-      const restMessage = restError?.message || "";
-      const combined = `${restMessage}\n${mcpMessage}`;
-      if (isBrevoIpAuthorizationError(combined)) {
-        let outboundIp = "";
-        try {
-          const ipRes = await fetch("https://api.ipify.org?format=json", { cache: "no-store" });
-          if (ipRes.ok) {
-            const data = (await ipRes.json()) as { ip?: string };
-            outboundIp = String(data.ip || "").trim();
-          }
-        } catch {
-          // ignore
-        }
-        throw new Error(
-          `Brevo blocked this server IP (key ${brevoKeyHint(apiKey)} looks fine). In Brevo go to Settings → Security → Authorized IPs, authorize ${outboundIp || "this server’s public IP"}, or turn off API IP blocking. Also check email for “Validate your IP address”. Rest: ${restMessage.slice(0, 180)}`,
-        );
-      }
-      const restAuth = isLikelyApiAuthRejection(restMessage);
-      const mcpAuth = isLikelyApiAuthRejection(mcpMessage);
-      if (restAuth && mcpAuth) {
-        throw new Error(
-          `Brevo returned 401 for this key ${brevoKeyHint(apiKey)}. If the key is correct, Brevo is often blocking the server IP — Settings → Security → Authorized IPs (or disable API IP blocking). Use a standard API key (xkeysib-…) or an MCP key from SMTP & API. Details: REST ${restMessage.slice(0, 120)} | MCP ${mcpMessage.slice(0, 120)}`,
-        );
-      }
-      if (!restAuth && restError) {
-        throw new Error(`Could not reach Brevo API (${restMessage}). Check server network access to api.brevo.com.`);
-      }
-      throw new Error(`Brevo MCP validation failed: ${mcpMessage}`);
-    }
+    const resolved = await resolveBrevoConnection(input.apiKey);
+    return { mcpUrl: resolved.mcpUrl, warning: resolved.warning };
   }
   if (input.provider === "lemlist") {
     await requestJson(`${LEMLIST}/api/campaigns?limit=1&offset=0`, {

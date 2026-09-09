@@ -25,15 +25,19 @@ async function mcpRequest(
   method: string,
   params?: Record<string, unknown>,
   sessionId?: string,
-  options?: { authHeader?: "bearer" | "api-key" },
+  options?: { authHeader?: "bearer" | "bearer-nospace" | "api-key" },
 ) {
   const authHeader = options?.authHeader || "bearer";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
+    "MCP-Protocol-Version": "2024-11-05",
   };
   if (authHeader === "api-key") {
     headers["api-key"] = apiKey;
+  } else if (authHeader === "bearer-nospace") {
+    // Some Brevo config snippets omit the space after Bearer.
+    headers.Authorization = `Bearer${apiKey}`;
   } else {
     headers.Authorization = `Bearer ${apiKey}`;
   }
@@ -46,7 +50,7 @@ async function mcpRequest(
       jsonrpc: "2.0",
       id: Date.now(),
       method,
-      ...(params ? { params } : {}),
+      ...(params !== undefined ? { params } : {}),
     }),
     cache: "no-store",
   });
@@ -57,12 +61,17 @@ async function mcpRequest(
     throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 800)}`);
   }
 
-  // Some MCP HTTP transports return SSE frames.
-  const jsonLine = text
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.startsWith("data: "));
-  const payload = jsonLine ? jsonLine.slice(6) : text;
+  // MCP HTTP may return plain JSON or SSE frames (possibly multiple data: lines).
+  let payload = text.trim();
+  if (payload.includes("data:")) {
+    const dataLines = payload
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.replace(/^data:\s?/, ""));
+    payload = dataLines[dataLines.length - 1] || payload;
+  }
+
   let parsed: JsonRpcResult;
   try {
     parsed = JSON.parse(payload) as JsonRpcResult;
@@ -78,43 +87,51 @@ async function mcpRequest(
 async function withMcpSession<T>(
   mcpUrl: string,
   apiKey: string,
-  run: (sessionId: string, authHeader: "bearer" | "api-key") => Promise<T>,
+  run: (sessionId: string, authHeader: "bearer" | "bearer-nospace" | "api-key") => Promise<T>,
 ) {
-  const modes: Array<"bearer" | "api-key"> = ["bearer", "api-key"];
+  const modes: Array<"bearer" | "bearer-nospace" | "api-key"> = [
+    "bearer",
+    "bearer-nospace",
+    "api-key",
+  ];
+  const protocolVersions = ["2024-11-05", "2025-03-26"];
   let lastError: unknown;
 
   for (const authHeader of modes) {
-    try {
-      const init = await mcpRequest(
-        mcpUrl,
-        apiKey,
-        "initialize",
-        {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "nexuses", version: "1.0.0" },
-        },
-        undefined,
-        { authHeader },
-      );
+    for (const protocolVersion of protocolVersions) {
       try {
-        await mcpRequest(
+        const init = await mcpRequest(
           mcpUrl,
           apiKey,
-          "notifications/initialized",
+          "initialize",
+          {
+            protocolVersion,
+            capabilities: {},
+            clientInfo: { name: "nexuses", version: "1.0.0" },
+          },
           undefined,
-          init.sessionId,
           { authHeader },
         );
-      } catch {
-        // Some servers ignore the follow-up notification.
+        try {
+          await mcpRequest(
+            mcpUrl,
+            apiKey,
+            "notifications/initialized",
+            undefined,
+            init.sessionId,
+            { authHeader },
+          );
+        } catch {
+          // Some servers ignore the follow-up notification.
+        }
+        return await run(init.sessionId, authHeader);
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        const authFail = /\b401\b|unauthorized|invalid.*key|authentication/i.test(message);
+        // Auth failures: try next mode. Protocol mismatches: try next version.
+        if (!authFail && !/protocol|version|unsupported/i.test(message)) throw err;
       }
-      return await run(init.sessionId, authHeader);
-    } catch (err) {
-      lastError = err;
-      const message = err instanceof Error ? err.message : String(err);
-      const authFail = /\b401\b|unauthorized|invalid.*key|authentication/i.test(message);
-      if (!authFail) throw err;
     }
   }
 
