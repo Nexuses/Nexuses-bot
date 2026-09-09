@@ -16,6 +16,7 @@ import { getOwnedChat, serializeChat, titleFromText } from "@/lib/chats";
 import { redactSecrets } from "@/lib/integrations";
 import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { complete, type ContentPart, type LlmMessage } from "@/lib/llm";
+import { formatMemoryPrompt, rememberChatTurn, searchMemories } from "@/lib/memory";
 import { requireProjectMember } from "@/lib/project-access";
 import { serializeIntegration } from "@/lib/serialize-integration";
 import { serializeMessage } from "@/lib/serialize-message";
@@ -206,6 +207,14 @@ export async function POST(request: Request, { params }: Params) {
     item.provider === "other" ? `${item.name} (custom)` : item.name,
   );
 
+  const memories = await searchMemories({
+    userId: session.userId,
+    projectId: id,
+    chatId: String(chat._id),
+    query: displayText || text,
+  });
+  const memoryBlock = formatMemoryPrompt(memories);
+
   const system = `You are Nexuses, a Grok-style action agent for the project "${project.name}".
 You do the work. You are not a documentation bot.
 
@@ -252,7 +261,7 @@ ${HTML_DASHBOARD_PROMPT}
 Connected APIs: ${connected.length ? connected.join(", ") : "none yet"}.
 Project: ${project.name}. Project logo URL (use as client logo on the right of HTML report headers unless the user gives another): ${project.logo || "none — ask the user for the client logo URL if making a branded dashboard"}.
 Nexuses logo URL (always available — use this image for Nexuses branding in HTML/emails/reports; do not invent another): https://cdn-nexlink.s3.us-east-2.amazonaws.com/Nexuses-full-logo-dark_8d412ea3-bf11-4fc6-af9c-bee7e51ef494.png.
-${providerGuide(integrations)}`;
+${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
 
   const llmMessages: LlmMessage[] = [
     { role: "system", content: system },
@@ -408,6 +417,13 @@ ${providerGuide(integrations)}`;
             content,
             toolsUsed,
           });
+          rememberChatTurn({
+            userId: session.userId,
+            projectId: id,
+            chatId: String(chat._id),
+            userText: String(userMessage.content || displayText),
+            assistantText: content,
+          });
           send({
             type: "done",
             message: serializeMessage(saved),
@@ -467,6 +483,13 @@ ${providerGuide(integrations)}`;
           role: "assistant",
           content,
           toolsUsed,
+        });
+        rememberChatTurn({
+          userId: session.userId,
+          projectId: id,
+          chatId: String(chat._id),
+          userText: String(userMessage.content || displayText),
+          assistantText: content,
         });
         send({
           type: "done",
