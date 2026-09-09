@@ -962,7 +962,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "start_campaign_automation",
         description:
-          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, AND any connected custom API (provider other — e.g. Unified Portal, SmartLead). Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. For lemlist/brevo: pass source + campaign + attio_list. For custom APIs: pass source \"other\" (or the integration name), integration, campaign label, attio_list, AND a recipe (poll_path + field mapping). First probe the custom API with custom_api_request if needed, then save the working path/fields as the recipe.",
+          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal (built-in), AND other custom APIs. Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. Lemlist/Brevo: source + campaign + attio_list. Unified Portal: source/integration = connected name, campaign, attio_list, optional campaign_kind — poll_path NOT required (runner calls process-due + syncs opens/clicks). Other custom APIs: pass recipe poll_path + field mapping.",
         parameters: {
           type: "object",
           properties: {
@@ -1042,6 +1042,12 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               items: { type: "string" },
               description:
                 'Custom API only: values at completed_path that mean "done" (e.g. completed, ended)',
+            },
+            campaign_kind: {
+              type: "string",
+              enum: ["drip", "oneone"],
+              description:
+                "Unified Portal only: drip vs oneone (ids are separate per kind). Optional — bot searches both if omitted.",
             },
           },
           required: ["source", "campaign", "attio_list"],
@@ -1759,12 +1765,14 @@ export async function runTool(
           )
         : undefined;
     const completedValuesRaw = args.completed_values || args.completedValues;
+    const kindRaw = String(args.campaign_kind || args.campaignKind || args.kind || "").toLowerCase();
     const recipe =
       sourceProvider === "other"
         ? {
-            pollPath,
+            pollPath: pollPath || "/api/campaigns/process-due",
             method:
-              String(args.poll_method || args.pollMethod || "GET").toUpperCase() === "POST"
+              String(args.poll_method || args.pollMethod || (pollPath ? "GET" : "POST")).toUpperCase() ===
+              "POST"
                 ? ("POST" as const)
                 : ("GET" as const),
             body: args.poll_body ?? args.pollBody,
@@ -1781,13 +1789,26 @@ export async function runTool(
             completedValues: Array.isArray(completedValuesRaw)
               ? completedValuesRaw.map((item) => String(item || "").trim()).filter(Boolean)
               : undefined,
+            campaignKind: kindRaw === "drip" || kindRaw === "oneone" ? kindRaw : undefined,
           }
         : undefined;
 
     if (sourceProvider === "other" && !pollPath) {
-      throw new Error(
-        "For custom connectors, poll_path is required (path or URL that returns people/leads). Probe with custom_api_request first if unsure.",
+      const matched = integrations.find(
+        (item) =>
+          item.provider === "other" &&
+          item.name.toLowerCase() === sourceIntegrationName.toLowerCase(),
       );
+      const unified =
+        matched &&
+        /unified(\s*portal)?|unified\.nexuses|nexuses\.xyz/i.test(
+          `${matched.name} ${matched.baseUrl || ""}`,
+        );
+      if (!unified) {
+        throw new Error(
+          "For custom connectors, poll_path is required (path or URL that returns people/leads). Probe with custom_api_request first if unsure.",
+        );
+      }
     }
 
     context.onStatus?.(`Starting automatic updates for ${campaign}…`);

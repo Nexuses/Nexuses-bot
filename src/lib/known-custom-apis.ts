@@ -13,6 +13,16 @@ export type KnownCustomApi = {
 /** Built-in knowledge for common “Other” APIs so the bot does not guess. */
 export const KNOWN_CUSTOM_APIS: KnownCustomApi[] = [
   {
+    match: /unified(\s*portal)?|unified\.nexuses|nexuses\.xyz/i,
+    baseUrl: "https://unified.nexuses.xyz",
+    authType: "bearer",
+    docsUrl: "https://unified.nexuses.xyz/portal/integrations",
+    limits:
+      "Auth: Authorization Bearer up_live_… project API key (Integrations), or portal cookie. Always pass ?kind=drip|oneone on campaign id routes — drip #1 and 1-1 #1 are separate. Sends only advance while POST /api/campaigns/process-due is called (portal UI polls ~3s; Nexuses bot automation can drive this in the background). Public report links /r/{token} need no auth.",
+    pathHints:
+      "Campaigns: GET/POST /api/campaigns?kind=, GET/PATCH/DELETE /api/campaigns/{id}?kind=, POST /api/campaigns/launch, POST /api/campaigns/process-due, GET /api/campaigns/stats, GET /api/campaigns/{id}/recipients?filter=audience|delivered|opens|clicks|unsubscribes&kind=, POST /api/campaigns/{id}/share?kind=. CRM: GET /api/crm/contacts, GET /api/crm/lists, POST /api/crm/lists. SMTP: GET/POST /api/smtp/senders. Keys: GET/POST /api/integrations/keys.",
+  },
+  {
     match: /smartlead/i,
     baseUrl: "https://server.smartlead.ai/api/v1",
     authType: "query",

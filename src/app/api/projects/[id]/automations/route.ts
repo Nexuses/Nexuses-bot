@@ -64,13 +64,22 @@ export async function POST(request: Request, { params }: Params) {
     let recipe: SyncRecipe | undefined;
     if (sourceProvider === "other") {
       const pollPath = String(body.pollPath || body.poll_path || body.recipe?.pollPath || "").trim();
-      if (!pollPath) return jsonError("pollPath is required for custom connector sync");
+      const kindRaw = String(
+        body.campaignKind || body.campaign_kind || body.kind || body.recipe?.campaignKind || "",
+      ).toLowerCase();
+      const looksUnified = /unified(\s*portal)?|unified\.nexuses|nexuses\.xyz/i.test(
+        sourceIntegrationName,
+      );
+      if (!pollPath && !looksUnified) {
+        return jsonError("pollPath is required for custom connector sync");
+      }
       const stageMapRaw = body.stageMap || body.stage_map || body.recipe?.stageMap;
       recipe = {
-        pollPath,
+        pollPath: pollPath || "/api/campaigns/process-due",
         method:
-          String(body.pollMethod || body.poll_method || body.recipe?.method || "GET").toUpperCase() ===
-          "POST"
+          String(
+            body.pollMethod || body.poll_method || body.recipe?.method || (pollPath ? "GET" : "POST"),
+          ).toUpperCase() === "POST"
             ? "POST"
             : "GET",
         body: body.pollBody ?? body.poll_body ?? body.recipe?.body,
@@ -101,6 +110,7 @@ export async function POST(request: Request, { params }: Params) {
               (item: unknown) => String(item || "").trim(),
             ).filter(Boolean)
           : undefined,
+        campaignKind: kindRaw === "drip" || kindRaw === "oneone" ? kindRaw : undefined,
       };
     }
 

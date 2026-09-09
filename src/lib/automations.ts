@@ -15,6 +15,12 @@ import {
   type AutomationSourceProvider,
   type SyncRecipe,
 } from "@/lib/serialize-automation";
+import {
+  collectUnifiedPortalPeople,
+  driveUnifiedPortalProcessDue,
+  isUnifiedPortal,
+  resolveUnifiedPortalCampaign,
+} from "@/lib/unified-portal";
 import type { AuthType } from "@/types/chat";
 
 const ATTIO = "https://api.attio.com";
@@ -405,6 +411,7 @@ function normalizeRecipe(raw: SyncRecipe | null | undefined): SyncRecipe {
   const pollPath = String(raw?.pollPath || "").trim();
   if (!pollPath) throw new Error("recipe.pollPath is required for custom connector sync");
   const method = String(raw?.method || "GET").toUpperCase() === "POST" ? "POST" : "GET";
+  const kind = String(raw?.campaignKind || "").toLowerCase();
   return {
     pollPath,
     method,
@@ -417,6 +424,7 @@ function normalizeRecipe(raw: SyncRecipe | null | undefined): SyncRecipe {
     stageMap: raw?.stageMap,
     completedPath: String(raw?.completedPath || "").trim() || undefined,
     completedValues: (raw?.completedValues || []).map((v) => String(v).trim()).filter(Boolean),
+    campaignKind: kind === "drip" || kind === "oneone" ? kind : undefined,
   };
 }
 
@@ -517,6 +525,68 @@ function recipeCompleted(data: unknown, recipe: SyncRecipe) {
   return /^(ended|done|completed|archived|sent|finished|closed|inactive)$/i.test(text);
 }
 
+async function syncUnifiedPortalSource(job: {
+  userId: string;
+  projectId: string;
+  sourceIntegrationName: string;
+  campaignName: string;
+  attioList: string;
+  stageOpen: string;
+  stageClick: string;
+  stageReply: string;
+  recipe?: SyncRecipe | null;
+}) {
+  const integration = await getCustomIntegration(
+    job.userId,
+    job.projectId,
+    job.sourceIntegrationName,
+  );
+  const attio = await getIntegration(job.userId, job.projectId, "attio");
+  const list = await resolveAttioList(attio.apiKey, job.attioList);
+
+  // Keep portal sends moving even when nobody has the report page open.
+  const dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
+
+  const kindHint =
+    job.recipe?.campaignKind === "drip" || job.recipe?.campaignKind === "oneone"
+      ? job.recipe.campaignKind
+      : undefined;
+  const campaign = await resolveUnifiedPortalCampaign(
+    integration.apiKey,
+    integration.baseUrl,
+    job.campaignName,
+    kindHint,
+  );
+
+  const { people, counts } = await collectUnifiedPortalPeople({
+    apiKey: integration.apiKey,
+    baseUrl: integration.baseUrl,
+    campaignId: campaign.id,
+    kind: campaign.kind,
+    stageOpen: job.stageOpen || "open",
+    stageClick: job.stageClick || "click",
+    stageReply: job.stageReply || "unsubscribed",
+  });
+
+  let updated = 0;
+  let failed = 0;
+  for (const person of people.slice(0, 500)) {
+    try {
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+      updated += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+
+  const completed = campaign.status === "sent";
+  return {
+    completed,
+    campaignStatus: campaign.status || "running",
+    summary: `Unified Portal · ${campaign.name} (${campaign.kind}): process-due ×${dueRounds}; synced ${updated} to ${list.name} (${counts.opens} opens, ${counts.clicks} clicks, ${counts.unsubscribed} unsubs)${failed ? `; ${failed} failed` : ""}. Status: ${campaign.status || "unknown"}.`,
+  };
+}
+
 async function syncRecipeSource(job: {
   userId: string;
   projectId: string;
@@ -524,14 +594,31 @@ async function syncRecipeSource(job: {
   campaignName: string;
   attioList: string;
   stageOpen: string;
+  stageClick?: string;
+  stageReply?: string;
   recipe: SyncRecipe | null | undefined;
 }) {
-  const recipe = normalizeRecipe(job.recipe);
   const integration = await getCustomIntegration(
     job.userId,
     job.projectId,
     job.sourceIntegrationName,
   );
+
+  if (isUnifiedPortal(integration)) {
+    return syncUnifiedPortalSource({
+      userId: job.userId,
+      projectId: job.projectId,
+      sourceIntegrationName: job.sourceIntegrationName,
+      campaignName: job.campaignName,
+      attioList: job.attioList,
+      stageOpen: job.stageOpen,
+      stageClick: job.stageClick || "click",
+      stageReply: job.stageReply || "unsubscribed",
+      recipe: job.recipe,
+    });
+  }
+
+  const recipe = normalizeRecipe(job.recipe);
   const attio = await getIntegration(job.userId, job.projectId, "attio");
   const list = await resolveAttioList(attio.apiKey, job.attioList);
 
@@ -592,6 +679,8 @@ export async function runAutomationById(automationId: string) {
         campaignName: job.campaignName,
         attioList: job.attioList,
         stageOpen: job.stageOpen,
+        stageClick: job.stageClick,
+        stageReply: job.stageReply,
         recipe: job.recipe as SyncRecipe | undefined,
       });
     }
@@ -678,8 +767,18 @@ export async function startCampaignAutomation(input: {
     if (!sourceIntegrationName) {
       throw new Error("integration name is required for custom connector sync");
     }
-    await getCustomIntegration(input.userId, input.projectId, sourceIntegrationName);
-    recipe = normalizeRecipe(input.recipe);
+    const custom = await getCustomIntegration(input.userId, input.projectId, sourceIntegrationName);
+    sourceIntegrationName = custom.name;
+    if (isUnifiedPortal(custom)) {
+      const kind = String(input.recipe?.campaignKind || "").toLowerCase();
+      recipe = {
+        pollPath: "/api/campaigns/process-due",
+        method: "POST",
+        campaignKind: kind === "drip" || kind === "oneone" ? kind : undefined,
+      };
+    } else {
+      recipe = normalizeRecipe(input.recipe);
+    }
   }
 
   const label =
@@ -700,6 +799,12 @@ export async function startCampaignAutomation(input: {
     return serializeAutomation(existing);
   }
 
+  const defaultInterval =
+    sourceProvider === "other" &&
+    isUnifiedPortal({ name: sourceIntegrationName })
+      ? 1
+      : 2;
+
   const job = await Automation.create({
     userId: input.userId,
     projectId: input.projectId,
@@ -713,7 +818,10 @@ export async function startCampaignAutomation(input: {
     stageOpen: input.stageOpen || "open",
     stageClick: input.stageClick || "click",
     stageReply: input.stageReply || "hot",
-    intervalMinutes: Math.min(Math.max(input.intervalMinutes || 2, 1), 60),
+    intervalMinutes: Math.min(
+      Math.max(input.intervalMinutes || defaultInterval, 1),
+      60,
+    ),
     recipe: sourceProvider === "other" ? recipe : undefined,
     nextRunAt: new Date(),
   });

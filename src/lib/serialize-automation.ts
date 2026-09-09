@@ -14,6 +14,8 @@ export type SyncRecipe = {
   completedPath?: string;
   /** If the completedPath value matches one of these (case-insensitive), the job completes. */
   completedValues?: string[];
+  /** Unified Portal: drip | oneone */
+  campaignKind?: "drip" | "oneone" | string;
 };
 
 export type AutomationSourceProvider = "lemlist" | "brevo" | "other";
@@ -43,7 +45,7 @@ function serializeRecipe(raw: unknown): SyncRecipe | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const pollPath = String(r.pollPath || "").trim();
-  if (!pollPath) return null;
+  if (!pollPath && !r.campaignKind) return null;
   const stageMapRaw = r.stageMap;
   let stageMap: Record<string, string> | undefined;
   if (stageMapRaw && typeof stageMapRaw === "object") {
@@ -53,8 +55,9 @@ function serializeRecipe(raw: unknown): SyncRecipe | null {
     }
   }
   const method = String(r.method || "GET").toUpperCase();
+  const kind = String(r.campaignKind || "").toLowerCase();
   return {
-    pollPath,
+    pollPath: pollPath || "/api/campaigns/process-due",
     method: method === "POST" ? "POST" : "GET",
     body: r.body,
     itemsPath: String(r.itemsPath || "").trim() || undefined,
@@ -67,6 +70,7 @@ function serializeRecipe(raw: unknown): SyncRecipe | null {
     completedValues: Array.isArray(r.completedValues)
       ? r.completedValues.map((item) => String(item || "").trim()).filter(Boolean)
       : undefined,
+    campaignKind: kind === "drip" || kind === "oneone" ? kind : undefined,
   };
 }
 
