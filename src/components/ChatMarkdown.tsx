@@ -355,6 +355,81 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   );
 }
 
+function ShareReportCard({ href, label }: { href: string; label?: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [html, setHtml] = useState("");
+  const [error, setError] = useState("");
+  const idMatch = href.match(/\/p\/([A-Za-z0-9_-]+)/);
+  const publicId = idMatch?.[1] || "";
+
+  async function openPreview() {
+    if (!publicId) return;
+    if (html) {
+      setOpen(true);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/shares/public/${encodeURIComponent(publicId)}`);
+      const data = (await res.json().catch(() => null)) as
+        | { html?: string; error?: string }
+        | null;
+      if (!res.ok || !data?.html) {
+        setError(data?.error || "Could not load report HTML");
+        return;
+      }
+      setHtml(data.html);
+      setOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load report HTML");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="my-3 flex flex-col gap-2 rounded-2xl border border-line bg-ink-2/80 p-3 sm:flex-row sm:items-center sm:justify-between">
+      <span className="min-w-0">
+        <span className="block text-xs uppercase tracking-[0.14em] text-muted">Report</span>
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-1 block truncate text-sm text-sea underline decoration-sea/40 underline-offset-2 hover:text-sea-2"
+        >
+          {label || href}
+        </a>
+        {error ? <span className="mt-1 block text-xs text-red-500">{error}</span> : null}
+      </span>
+      <span className="flex shrink-0 flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => void openPreview()}
+          disabled={busy || !publicId}
+          className="rounded-full border border-line bg-panel px-3 py-1.5 text-xs font-medium text-sea hover:border-sea hover:bg-ink-2 disabled:opacity-60"
+        >
+          {busy ? "Loading…" : "Preview HTML"}
+        </button>
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="rounded-full border border-line bg-panel px-3 py-1.5 text-xs font-medium text-paper no-underline hover:border-sea"
+        >
+          Open link
+        </a>
+      </span>
+      <HtmlPreviewModal html={html} open={open} onClose={() => setOpen(false)} />
+    </span>
+  );
+}
+
+function isPublicShareUrl(url: string) {
+  return /\/p\/[A-Za-z0-9_-]+(?:[?#].*)?$/i.test(url.trim());
+}
+
 const components: Components = {
   h1: ({ children }) => (
     <h1 className="mb-3 font-display text-2xl tracking-tight text-paper">{children}</h1>
@@ -387,6 +462,9 @@ const components: Components = {
           {children}
         </a>
       );
+    }
+    if (isPublicShareUrl(url)) {
+      return <ShareReportCard href={url} label={children} />;
     }
     return (
       <a

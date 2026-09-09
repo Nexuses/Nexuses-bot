@@ -29,6 +29,9 @@ export function openingStatus(message: string, fileNames: string[]) {
     return "Looking that up in Lemlist…";
   }
   if (/lemlist/i.test(message)) return "Working with Lemlist…";
+  if (/report|dashboard|build|create|campaign|import|export/i.test(message)) {
+    return "Understanding your request…";
+  }
   return "Working on it…";
 }
 

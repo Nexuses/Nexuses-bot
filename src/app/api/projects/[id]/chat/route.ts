@@ -17,6 +17,11 @@ import { redactSecrets } from "@/lib/integrations";
 import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { complete, type ContentPart, type LlmMessage } from "@/lib/llm";
 import { formatMemoryPrompt, rememberChatTurn, searchMemories } from "@/lib/memory";
+import {
+  formatClarifyingQuestions,
+  needsPromptStructuring,
+  structureUserPrompt,
+} from "@/lib/prompt-structure";
 import { requireProjectMember } from "@/lib/project-access";
 import { serializeIntegration } from "@/lib/serialize-integration";
 import { serializeMessage } from "@/lib/serialize-message";
@@ -222,7 +227,7 @@ Rules:
 - When the user asks to create, update, delete, send, search, or fetch something, you MUST call tools and complete it in their connected APIs.
 - Never answer with only steps, sample JSON, or "you can do this in Attio/Brevo/Lemlist". Execute it.
 - If a tool errors, fix the payload and retry. Only stop after a real API success or a hard permission error.
-- After tools succeed, tell the user what changed in plain language: names, counts, status, dates. Do not mention IDs.
+- After tools succeed, tell the user what changed in plain language: names, counts, status, dates — briefly. Do not mention IDs. Do not narrate every tool call.
 - Users can connect tools in chat.
   - Attio / Brevo / Lemlist (API key): if they paste a key, call connect_integration immediately. Do not only send them to the Integrations panel.
   - Notion (OAuth): if they say integrate / connect Notion and did NOT paste a key, call start_oauth_connect with provider notion, then put the exact button_markdown from the tool result in your reply so they get a Connect Notion button that opens Notion's authorize page. After they return, tools work.
@@ -241,14 +246,26 @@ What the user sees (required):
 - Tables and lists should use useful fields only: name, email, status, stage, date, owner, count, error message.
 - Keep IDs for your own tool calls. Do not put them in the final answer.
 
+Reply style (required — users skim; long essays are a failure):
+- Final replies must be short and scannable. Default: a few short bullets or ≤ ~8–12 lines. Only go longer when the user explicitly asked for detail, a full table in chat, or a walkthrough.
+- Lead with the outcome: what you did, the link, the count, or the one thing you need from them. No preamble.
+- Never narrate internal reasoning in the user-visible reply. Ban phrases like: "Let me reconsider", "Actually,", "Given the constraints", "Let me be honest", "The realistic path", "I need to", "Let me try", "Wait —", or multi-paragraph rethink loops. Think privately; write the conclusion only.
+- Do not restate the whole problem history. Do not list every endpoint you tried. Status updates belong in the live status line, not in the final message.
+- Put large data in the dashboard / share link — not pasted into chat. In chat: short summary + [Open report](url).
+- When blocked, use this compact shape (and stop):
+  **Blocked:** one sentence why.
+  **Need from you:** one concrete ask (e.g. attach CSVs / paste a key / pick a list).
+  Optional: one line of what you already have.
+- When successful, prefer: what changed + counts + link (if any). Skip filler praise and disclaimers.
+
 Formatting (required):
-- Write the final answer in clean Markdown. Use headings, short paragraphs, and bullet lists.
-- When showing 2 or more items with the same fields, use a Markdown table with a header row.
+- Write the final answer in clean Markdown. Prefer short bullets over long paragraphs. Use a heading only when it helps scan.
+- When showing 2 or more items with the same fields, use a Markdown table with a header row — but keep chat tables small (roughly ≤20 rows); for bigger sets use share_data_dashboard / a share link.
 - When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons — but for LARGE dashboards do not dump the full table in the fence; use tools instead.
 - For a live / public / shareable dashboard link: NEVER invent or guess a /p/... URL — fake links 404.
-- Campaign / lead tables (any size, including 100–500+ rows): call share_data_dashboard with title, kpis, columns, and rows JSON, then paste ONLY the returned url.
-- Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste ONLY the returned url.
-- Small HTML only: share_html with the full document is fine.
+- Campaign / lead tables (any size, including 100–500+ rows): call share_data_dashboard with title, kpis, columns, and rows JSON, then paste the returned url as a Markdown link like [Open report](url). The chat UI will show Preview HTML + Open link.
+- Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste the returned url as [Open report](url).
+- Small HTML only: share_html with the full document is fine — also paste [Open report](url) from the tool result.
 ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on).
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
@@ -319,6 +336,79 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
           type: "status",
           text: openingStatus(text || displayText, files.map((file) => file.name)),
         });
+
+        const lastAssistantText = String(
+          history.find((message) => message.role === "assistant")?.content || "",
+        );
+        if (
+          needsPromptStructuring({
+            text: displayText || text,
+            fileCount: files.length,
+            lastAssistantText,
+          })
+        ) {
+          send({ type: "status", text: "Understanding your request…" });
+          const structured = await withSlowHint(
+            send,
+            "Clarifying what you need…",
+            structureUserPrompt({
+              text: displayText || text,
+              connected,
+              fileNames: files.map((file) => file.name),
+              projectName: project.name,
+            }),
+          );
+
+          if (!structured.ready && structured.questions.length) {
+            const content = formatClarifyingQuestions(structured.questions, structured.goal);
+            const saved = await Message.create({
+              userId: session.userId,
+              projectId: id,
+              chatId: chat._id,
+              role: "assistant",
+              content,
+              toolsUsed: [],
+            });
+            rememberChatTurn({
+              userId: session.userId,
+              projectId: id,
+              chatId: String(chat._id),
+              userText: String(userMessage.content || displayText),
+              assistantText: content,
+            });
+            send({
+              type: "done",
+              message: serializeMessage(saved),
+              chat: serializeChat(chat),
+              userMessage: serializeMessage(userMessage),
+              integrations: integrations.map((item) =>
+                serializeIntegration({
+                  _id: item._id,
+                  provider: item.provider,
+                  name: item.name,
+                  apiKey: item.apiKey,
+                  baseUrl: item.baseUrl,
+                  mcpUrl: item.mcpUrl,
+                  authType: item.authType,
+                }),
+              ),
+            });
+            return;
+          }
+
+          if (structured.brief) {
+            llmMessages.push({
+              role: "system",
+              content: structured.brief,
+            });
+            send({
+              type: "status",
+              text: structured.goal
+                ? `Got it — ${structured.goal.slice(0, 80)}${structured.goal.length > 80 ? "…" : ""}`
+                : "Got it — starting the work…",
+            });
+          }
+        }
 
         for (let round = 0; round < 24; round += 1) {
           if (round === 2) send({ type: "status", text: "Still working — this can take a little time…" });
@@ -453,7 +543,7 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
         llmMessages.push({
           role: "user",
           content:
-            "Stop calling tools. Answer the user's last question now using only the tool results you already have. If the list is incomplete, show what you have. Stay on that product (Lemlist, Attio, or Brevo). Do not mention Attio unless this was an Attio request. Do not mention IDs. Never repeat API keys.",
+            "Stop calling tools. Answer now in a SHORT user-facing reply (≤ ~8–12 lines). Lead with outcome or one clear ask. No internal monologue, no endpoint essays. Incomplete data: say what you have + one next step. Stay on that product (Lemlist, Attio, or Brevo). Do not mention Attio unless this was an Attio request. Do not mention IDs. Never repeat API keys.",
         });
         const last = await complete(llmMessages, []);
         const content = await ensureLiveShareInReply({

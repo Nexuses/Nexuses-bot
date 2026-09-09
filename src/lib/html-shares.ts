@@ -315,8 +315,12 @@ export async function ensureLiveShareInReply(input: {
   const real = [...input.realShareUrls];
 
   if (real.length) {
-    if (!real.some((url) => content.includes(url))) {
-      content = `${content}\n\n**Live dashboard:** ${real[real.length - 1]}`.trim();
+    const url = real[real.length - 1];
+    if (!real.some((item) => content.includes(item))) {
+      content = `${content}\n\n**Live dashboard:** [Open report](${url})`.trim();
+    } else if (!content.includes(`](${url})`) && content.includes(url)) {
+      // Promote a bare URL into a markdown link so chat shows Preview HTML.
+      content = content.replace(url, `[Open report](${url})`);
     }
     return content;
   }
@@ -339,7 +343,7 @@ export async function ensureLiveShareInReply(input: {
     });
     content = scrubInventedShareUrls(content, [share.url]);
     if (!content.includes(share.url)) {
-      content = `${content}\n\n**Live dashboard:** ${share.url}`.trim();
+      content = `${content}\n\n**Live dashboard:** [Open report](${share.url})`.trim();
     }
   } catch {
     content = `${content}\n\n_I could not publish a live link automatically — use the Share link button on the HTML preview._`.trim();

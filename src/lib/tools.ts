@@ -1535,7 +1535,7 @@ export async function runTool(
       ok: true,
       title: share.title,
       url: share.url,
-      note: "Share this public URL. Header shows Nexuses logo (left) and client/project logo (right).",
+      note: "Paste this as a Markdown link: [Open report](url). Chat shows Preview HTML + Open link. Header shows Nexuses logo (left) and client/project logo (right).",
     });
   }
 
@@ -1581,7 +1581,7 @@ export async function runTool(
       ok: true,
       title: share.title,
       url: share.url,
-      note: "Chunked publish complete. Paste this exact URL in your reply.",
+      note: "Chunked publish complete. Paste as [Open report](url) so chat shows Preview HTML.",
     });
   }
 
@@ -1640,7 +1640,7 @@ export async function runTool(
       title: share.title,
       url: share.url,
       rows: rows.length,
-      note: "Server-built dashboard. Paste this exact URL in your reply.",
+      note: "Server-built dashboard. Paste as [Open report](url) so chat shows Preview HTML.",
     });
   }
 
