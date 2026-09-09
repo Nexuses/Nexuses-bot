@@ -1,9 +1,21 @@
 import { dbConnect } from "@/lib/db";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import { callBrevoMcpTool, listBrevoMcpTools } from "@/lib/brevo-mcp";
+import {
+  looksLikeQueryApiKeyAuth,
+  looksLikeRawAuthorizationAuth,
+  normalizeCustomBaseUrl,
+  resolveCustomAuthType,
+} from "@/lib/integrations";
 import { Integration } from "@/models/Integration";
 import { Automation } from "@/models/Automation";
-import { serializeAutomation, type AutomationDTO } from "@/lib/serialize-automation";
+import {
+  serializeAutomation,
+  type AutomationDTO,
+  type AutomationSourceProvider,
+  type SyncRecipe,
+} from "@/lib/serialize-automation";
+import type { AuthType } from "@/types/chat";
 
 const ATTIO = "https://api.attio.com";
 const LEMLIST = "https://api.lemlist.com";
@@ -11,6 +23,13 @@ const LEMLIST = "https://api.lemlist.com";
 type StoredKey = {
   apiKey: string;
   mcpUrl?: string;
+};
+
+type CustomIntegration = {
+  name: string;
+  apiKey: string;
+  baseUrl?: string;
+  authType?: AuthType;
 };
 
 function attioHeaders(apiKey: string) {
@@ -25,6 +44,44 @@ function lemlistHeaders(apiKey: string) {
     Authorization: `Basic ${Buffer.from(`:${apiKey}`).toString("base64")}`,
     "Content-Type": "application/json",
   };
+}
+
+function customHeaders(integration: CustomIntegration): Record<string, string> {
+  if (looksLikeQueryApiKeyAuth(integration)) {
+    return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+  }
+  if (looksLikeRawAuthorizationAuth(integration)) {
+    return {
+      Authorization: integration.apiKey,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+  }
+  const auth = resolveCustomAuthType(integration);
+  if (auth === "api-key") {
+    return { "api-key": integration.apiKey, "Content-Type": "application/json" };
+  }
+  if (auth === "basic") {
+    return {
+      Authorization: `Basic ${Buffer.from(`:${integration.apiKey}`).toString("base64")}`,
+      "Content-Type": "application/json",
+    };
+  }
+  return {
+    Authorization: `Bearer ${integration.apiKey}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function withQueryApiKey(url: string, apiKey: string) {
+  const parsed = new URL(url);
+  if (!parsed.searchParams.get("api_key")) {
+    parsed.searchParams.set("api_key", apiKey);
+  }
+  return parsed.toString();
 }
 
 async function requestJson(url: string, init: RequestInit) {
@@ -45,11 +102,47 @@ function asObjects(data: unknown): Record<string, unknown>[] {
   }
   if (data && typeof data === "object") {
     const record = data as Record<string, unknown>;
-    for (const key of ["data", "campaigns", "leads", "activities", "contacts"]) {
+    for (const key of ["data", "campaigns", "leads", "activities", "contacts", "people", "results", "items"]) {
       if (Array.isArray(record[key])) return asObjects(record[key]);
     }
   }
   return [];
+}
+
+function getByPath(data: unknown, path: string): unknown {
+  if (!path.trim()) return data;
+  let cur: unknown = data;
+  for (const part of path.split(".").map((p) => p.trim()).filter(Boolean)) {
+    if (cur == null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return cur;
+}
+
+function pickField(item: Record<string, unknown>, preferred?: string, fallbacks: string[] = []) {
+  const keys = preferred ? [preferred, ...fallbacks] : fallbacks;
+  for (const key of keys) {
+    const value = item[key];
+    if (value == null) continue;
+    if (typeof value === "string" || typeof value === "number") return String(value).trim();
+    if (Array.isArray(value) && value[0] != null) {
+      const first = value[0];
+      if (typeof first === "string" || typeof first === "number") return String(first).trim();
+      if (first && typeof first === "object") {
+        const nested = first as Record<string, unknown>;
+        for (const nestedKey of ["email", "email_address", "value", "address"]) {
+          if (nested[nestedKey]) return String(nested[nestedKey]).trim();
+        }
+      }
+    }
+    if (value && typeof value === "object") {
+      const nested = value as Record<string, unknown>;
+      for (const nestedKey of ["email", "email_address", "value", "full_name", "name"]) {
+        if (nested[nestedKey]) return String(nested[nestedKey]).trim();
+      }
+    }
+  }
+  return "";
 }
 
 async function getIntegration(
@@ -63,15 +156,32 @@ async function getIntegration(
   return { apiKey: doc.apiKey, mcpUrl: doc.mcpUrl || "" };
 }
 
+async function getCustomIntegration(
+  userId: string,
+  projectId: string,
+  name: string,
+): Promise<CustomIntegration> {
+  await dbConnect();
+  const docs = await Integration.find({ userId, projectId, provider: "other" }).lean();
+  const match = docs.find((item) => item.name.toLowerCase() === name.toLowerCase());
+  if (!match?.apiKey) throw new Error(`Custom API "${name}" is not connected`);
+  return {
+    name: match.name,
+    apiKey: match.apiKey,
+    baseUrl: match.baseUrl || "",
+    authType: match.authType,
+  };
+}
+
 async function resolveLemlistCampaign(apiKey: string, name: string) {
   const campaigns = asObjects(
     await requestJson(`${LEMLIST}/api/campaigns?limit=100&offset=0`, {
       headers: lemlistHeaders(apiKey),
     }),
   );
-  const match = campaigns.find(
-    (item) => String(item.name || "").toLowerCase() === name.toLowerCase(),
-  ) || campaigns.find((item) => String(item.name || "").toLowerCase().includes(name.toLowerCase()));
+  const match =
+    campaigns.find((item) => String(item.name || "").toLowerCase() === name.toLowerCase()) ||
+    campaigns.find((item) => String(item.name || "").toLowerCase().includes(name.toLowerCase()));
   if (!match) throw new Error(`Lemlist campaign "${name}" not found`);
   return {
     id: String(match._id || ""),
@@ -207,7 +317,6 @@ async function syncLemlistCampaign(job: {
   const clicks = await lemlistPeople(lemlist.apiKey, campaign.id, "emailsClicked");
   const replies = await lemlistPeople(lemlist.apiKey, campaign.id, "emailsReplied");
 
-  // Highest intent wins: reply > click > open
   const byEmail = new Map<string, { email: string; name: string; stage: string }>();
   for (const person of opens) {
     byEmail.set(person.email, { ...person, stage: job.stageOpen });
@@ -267,12 +376,10 @@ async function syncBrevoCampaign(job: {
     brevo.mcpUrl || BREVO_MCP_DEFAULT,
   );
 
-  // MCP results vary; treat "ended/sent/archived" in text as completed.
   const lower = raw.toLowerCase();
   const completed = /"status"\s*:\s*"(sent|archived|ended|completed|suspended)"/i.test(raw);
   const list = await resolveAttioList(attio.apiKey, job.attioList);
 
-  // Best-effort: extract emails from MCP payload and push to open stage.
   const emails = [...raw.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)].map((m) =>
     m[0].toLowerCase(),
   );
@@ -280,13 +387,7 @@ async function syncBrevoCampaign(job: {
   let updated = 0;
   for (const email of unique) {
     try {
-      await upsertAttioPerson(
-        attio.apiKey,
-        list.id,
-        list.stageSlug,
-        { email },
-        job.stageOpen,
-      );
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { email }, job.stageOpen);
       updated += 1;
     } catch {
       // continue
@@ -300,32 +401,200 @@ async function syncBrevoCampaign(job: {
   };
 }
 
+function normalizeRecipe(raw: SyncRecipe | null | undefined): SyncRecipe {
+  const pollPath = String(raw?.pollPath || "").trim();
+  if (!pollPath) throw new Error("recipe.pollPath is required for custom connector sync");
+  const method = String(raw?.method || "GET").toUpperCase() === "POST" ? "POST" : "GET";
+  return {
+    pollPath,
+    method,
+    body: raw?.body,
+    itemsPath: String(raw?.itemsPath || "").trim() || undefined,
+    emailField: String(raw?.emailField || "").trim() || undefined,
+    nameField: String(raw?.nameField || "").trim() || undefined,
+    stageField: String(raw?.stageField || "").trim() || undefined,
+    defaultStage: String(raw?.defaultStage || "").trim() || undefined,
+    stageMap: raw?.stageMap,
+    completedPath: String(raw?.completedPath || "").trim() || undefined,
+    completedValues: (raw?.completedValues || []).map((v) => String(v).trim()).filter(Boolean),
+  };
+}
+
+async function pollCustomApi(integration: CustomIntegration, recipe: SyncRecipe) {
+  const resolvedBase =
+    normalizeCustomBaseUrl(integration.name, integration.baseUrl || "") || integration.baseUrl || "";
+  let url = recipe.pollPath.startsWith("http")
+    ? recipe.pollPath
+    : `${resolvedBase.replace(/\/$/, "")}/${recipe.pollPath.replace(/^\//, "")}`;
+  if (!url.startsWith("http")) {
+    throw new Error(
+      `Custom API "${integration.name}" needs a base URL, or recipe.pollPath must be a full URL`,
+    );
+  }
+  if (looksLikeQueryApiKeyAuth(integration)) {
+    url = withQueryApiKey(url, integration.apiKey);
+  }
+  const method = recipe.method || "GET";
+  const init: RequestInit = {
+    method,
+    headers: customHeaders({
+      ...integration,
+      authType: resolveCustomAuthType(integration),
+    }),
+  };
+  if (method === "POST" && recipe.body != null) {
+    init.body = typeof recipe.body === "string" ? recipe.body : JSON.stringify(recipe.body);
+  }
+  return requestJson(url, init);
+}
+
+function extractPeopleFromRecipe(
+  data: unknown,
+  recipe: SyncRecipe,
+  fallbackStage: string,
+): { email: string; name: string; stage: string }[] {
+  const root = recipe.itemsPath ? getByPath(data, recipe.itemsPath) : data;
+  const items = asObjects(root);
+  const people: { email: string; name: string; stage: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const item of items) {
+    const email = pickField(item, recipe.emailField, [
+      "email",
+      "email_address",
+      "emailAddress",
+      "leadEmail",
+      "work_email",
+      "primary_email",
+    ])
+      .toLowerCase()
+      .trim();
+    if (!email.includes("@")) continue;
+    if (seen.has(email)) continue;
+    seen.add(email);
+
+    const name =
+      pickField(item, recipe.nameField, [
+        "name",
+        "full_name",
+        "fullName",
+        "leadName",
+        "firstName",
+        "first_name",
+      ]) ||
+      [pickField(item, undefined, ["firstName", "first_name"]), pickField(item, undefined, ["lastName", "last_name"])]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+
+    const rawStage = pickField(item, recipe.stageField, [
+      "stage",
+      "status",
+      "lead_status",
+      "leadStatus",
+      "event",
+    ]);
+    let stage = recipe.defaultStage || fallbackStage;
+    if (rawStage) {
+      const mapped = recipe.stageMap?.[rawStage] || recipe.stageMap?.[rawStage.toLowerCase()];
+      stage = mapped || rawStage;
+    }
+
+    people.push({ email, name, stage });
+  }
+  return people;
+}
+
+function recipeCompleted(data: unknown, recipe: SyncRecipe) {
+  if (!recipe.completedPath) return false;
+  const value = getByPath(data, recipe.completedPath);
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!text) return false;
+  const targets = (recipe.completedValues || []).map((v) => v.toLowerCase());
+  if (targets.length) return targets.includes(text);
+  return /^(ended|done|completed|archived|sent|finished|closed|inactive)$/i.test(text);
+}
+
+async function syncRecipeSource(job: {
+  userId: string;
+  projectId: string;
+  sourceIntegrationName: string;
+  campaignName: string;
+  attioList: string;
+  stageOpen: string;
+  recipe: SyncRecipe | null | undefined;
+}) {
+  const recipe = normalizeRecipe(job.recipe);
+  const integration = await getCustomIntegration(
+    job.userId,
+    job.projectId,
+    job.sourceIntegrationName,
+  );
+  const attio = await getIntegration(job.userId, job.projectId, "attio");
+  const list = await resolveAttioList(attio.apiKey, job.attioList);
+
+  const data = await pollCustomApi(integration, recipe);
+  const people = extractPeopleFromRecipe(data, recipe, job.stageOpen || "open").slice(0, 500);
+  const completed = recipeCompleted(data, recipe);
+
+  let updated = 0;
+  let failed = 0;
+  for (const person of people) {
+    try {
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+      updated += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+
+  return {
+    completed,
+    campaignStatus: completed ? "completed" : "running",
+    summary: `Synced ${updated} people to ${list.name} from ${integration.name} · ${job.campaignName} (polled ${recipe.pollPath}; ${people.length} emails found)${failed ? `; ${failed} failed` : ""}${completed ? "" : ". Will keep polling until you stop it (or completion rule matches)."}`,
+  };
+}
+
 export async function runAutomationById(automationId: string) {
   await dbConnect();
   const job = await Automation.findById(automationId);
   if (!job || job.status !== "running") return null;
 
   try {
-    const result =
-      job.sourceProvider === "lemlist"
-        ? await syncLemlistCampaign({
-            userId: String(job.userId),
-            projectId: String(job.projectId),
-            campaignName: job.campaignName,
-            attioList: job.attioList,
-            stageOpen: job.stageOpen,
-            stageClick: job.stageClick,
-            stageReply: job.stageReply,
-          })
-        : await syncBrevoCampaign({
-            userId: String(job.userId),
-            projectId: String(job.projectId),
-            campaignName: job.campaignName,
-            attioList: job.attioList,
-            stageOpen: job.stageOpen,
-            stageClick: job.stageClick,
-            stageReply: job.stageReply,
-          });
+    let result: { completed: boolean; campaignStatus: string; summary: string };
+    if (job.sourceProvider === "lemlist") {
+      result = await syncLemlistCampaign({
+        userId: String(job.userId),
+        projectId: String(job.projectId),
+        campaignName: job.campaignName,
+        attioList: job.attioList,
+        stageOpen: job.stageOpen,
+        stageClick: job.stageClick,
+        stageReply: job.stageReply,
+      });
+    } else if (job.sourceProvider === "brevo") {
+      result = await syncBrevoCampaign({
+        userId: String(job.userId),
+        projectId: String(job.projectId),
+        campaignName: job.campaignName,
+        attioList: job.attioList,
+        stageOpen: job.stageOpen,
+        stageClick: job.stageClick,
+        stageReply: job.stageReply,
+      });
+    } else {
+      result = await syncRecipeSource({
+        userId: String(job.userId),
+        projectId: String(job.projectId),
+        sourceIntegrationName: job.sourceIntegrationName || job.campaignName,
+        campaignName: job.campaignName,
+        attioList: job.attioList,
+        stageOpen: job.stageOpen,
+        recipe: job.recipe as SyncRecipe | undefined,
+      });
+    }
 
     job.lastRunAt = new Date();
     job.runCount = (job.runCount || 0) + 1;
@@ -333,7 +602,7 @@ export async function runAutomationById(automationId: string) {
     job.error = "";
     if (result.completed) {
       job.status = "completed";
-      job.lastSummary = `${result.summary} Campaign is complete — automatic updates stopped.`;
+      job.lastSummary = `${result.summary} Source is complete — automatic updates stopped.`;
     } else {
       job.nextRunAt = new Date(Date.now() + Math.max(1, job.intervalMinutes || 2) * 60_000);
     }
@@ -374,30 +643,55 @@ export function ensureAutomationRunner() {
       // keep runner alive
     });
   }, 30_000);
-  // Kick once soon after boot.
   void processDueAutomations().catch(() => undefined);
 }
 
 export async function startCampaignAutomation(input: {
   userId: string;
   projectId: string;
-  sourceProvider: "lemlist" | "brevo";
+  sourceProvider: AutomationSourceProvider;
+  sourceIntegrationName?: string;
   campaignName: string;
   attioList: string;
   stageOpen?: string;
   stageClick?: string;
   stageReply?: string;
   intervalMinutes?: number;
+  recipe?: SyncRecipe | null;
 }) {
   await dbConnect();
   ensureAutomationRunner();
 
-  const title = `Auto-update Attio from ${input.sourceProvider} · ${input.campaignName}`;
+  // Ensure Attio is connected for all sync jobs.
+  await getIntegration(input.userId, input.projectId, "attio");
+
+  let sourceProvider = input.sourceProvider;
+  let sourceIntegrationName = String(input.sourceIntegrationName || "").trim();
+  let recipe: SyncRecipe | undefined;
+
+  if (sourceProvider === "lemlist") {
+    await getIntegration(input.userId, input.projectId, "lemlist");
+  } else if (sourceProvider === "brevo") {
+    await getIntegration(input.userId, input.projectId, "brevo");
+  } else {
+    sourceProvider = "other";
+    if (!sourceIntegrationName) {
+      throw new Error("integration name is required for custom connector sync");
+    }
+    await getCustomIntegration(input.userId, input.projectId, sourceIntegrationName);
+    recipe = normalizeRecipe(input.recipe);
+  }
+
+  const label =
+    sourceProvider === "other" ? sourceIntegrationName || "custom API" : sourceProvider;
+  const title = `Auto-update Attio from ${label} · ${input.campaignName}`;
+
   const existing = await Automation.findOne({
     userId: input.userId,
     projectId: input.projectId,
     type: "campaign_to_attio",
-    sourceProvider: input.sourceProvider,
+    sourceProvider,
+    sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : "",
     campaignName: input.campaignName,
     attioList: input.attioList,
     status: "running",
@@ -412,17 +706,18 @@ export async function startCampaignAutomation(input: {
     type: "campaign_to_attio",
     status: "running",
     title,
-    sourceProvider: input.sourceProvider,
+    sourceProvider,
+    sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : "",
     campaignName: input.campaignName.trim(),
     attioList: input.attioList.trim(),
     stageOpen: input.stageOpen || "open",
     stageClick: input.stageClick || "click",
     stageReply: input.stageReply || "hot",
     intervalMinutes: Math.min(Math.max(input.intervalMinutes || 2, 1), 60),
+    recipe: sourceProvider === "other" ? recipe : undefined,
     nextRunAt: new Date(),
   });
 
-  // Run first sync immediately.
   const first = await runAutomationById(String(job._id));
   return first || serializeAutomation(job);
 }
@@ -461,7 +756,6 @@ export async function stopAutomation(input: {
 export async function listAutomations(userId: string, projectId: string) {
   await dbConnect();
   ensureAutomationRunner();
-  // Also process due jobs when listing (keeps UI fresh without relying only on interval).
   await processDueAutomations(3);
   const docs = await Automation.find({ userId, projectId })
     .sort({ updatedAt: -1 })

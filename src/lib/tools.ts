@@ -962,29 +962,86 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "start_campaign_automation",
         description:
-          "Start an automatic background sync: keep updating an Attio list from a running Lemlist or Brevo campaign until the campaign is complete. Use when the user says keep updating, continue syncing, auto-update, or until campaign completes. Requires Attio + Lemlist/Brevo connected.",
+          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, AND any connected custom API (provider other — e.g. Unified Portal, SmartLead). Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. For lemlist/brevo: pass source + campaign + attio_list. For custom APIs: pass source \"other\" (or the integration name), integration, campaign label, attio_list, AND a recipe (poll_path + field mapping). First probe the custom API with custom_api_request if needed, then save the working path/fields as the recipe.",
         parameters: {
           type: "object",
           properties: {
             source: {
               type: "string",
-              enum: ["lemlist", "brevo"],
-              description: "Where the campaign lives",
+              description:
+                'lemlist | brevo | other — or the custom integration name (treated as other)',
+            },
+            integration: {
+              type: "string",
+              description:
+                "Required for custom APIs: exact connected custom integration name (e.g. Unified Portal)",
             },
             campaign: {
               type: "string",
-              description: "Campaign name",
+              description: "Campaign / job label to sync (used in UI and dedupe)",
             },
             attio_list: {
               type: "string",
               description: "Attio list/pipeline name to update",
             },
-            stage_open: { type: "string", description: "Attio stage for opens. Default open." },
-            stage_click: { type: "string", description: "Attio stage for clicks. Default click." },
-            stage_reply: { type: "string", description: "Attio stage for replies. Default hot." },
+            stage_open: { type: "string", description: "Attio stage for opens / default. Default open." },
+            stage_click: { type: "string", description: "Attio stage for clicks (Lemlist). Default click." },
+            stage_reply: { type: "string", description: "Attio stage for replies (Lemlist). Default hot." },
             interval_minutes: {
               type: "number",
               description: "How often to sync while running. Default 2.",
+            },
+            poll_path: {
+              type: "string",
+              description:
+                "Custom API only: path or full URL to poll each run (e.g. /campaigns/123/leads)",
+            },
+            poll_method: {
+              type: "string",
+              enum: ["GET", "POST"],
+              description: "Custom API only: HTTP method. Default GET.",
+            },
+            poll_body: {
+              type: "object",
+              description: "Custom API only: JSON body when poll_method is POST",
+              additionalProperties: true,
+            },
+            items_path: {
+              type: "string",
+              description: 'Custom API only: dot path to the array of people, e.g. "data.leads"',
+            },
+            email_field: {
+              type: "string",
+              description: "Custom API only: field name for email on each item",
+            },
+            name_field: {
+              type: "string",
+              description: "Custom API only: field name for display name",
+            },
+            stage_field: {
+              type: "string",
+              description: "Custom API only: field name for stage/status on each item",
+            },
+            default_stage: {
+              type: "string",
+              description: "Custom API only: Attio stage when stage_field is missing",
+            },
+            stage_map: {
+              type: "object",
+              description:
+                "Custom API only: map raw status values to Attio stage names, e.g. { opened: \"open\", clicked: \"click\" }",
+              additionalProperties: { type: "string" },
+            },
+            completed_path: {
+              type: "string",
+              description:
+                "Custom API only: optional dot path to a status field used to auto-stop the job",
+            },
+            completed_values: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                'Custom API only: values at completed_path that mean "done" (e.g. completed, ended)',
             },
           },
           required: ["source", "campaign", "attio_list"],
@@ -1004,11 +1061,11 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       type: "function",
       function: {
         name: "stop_automation",
-        description: "Stop a running automatic campaign→Attio sync.",
+        description: "Stop a running automatic source→Attio sync.",
         parameters: {
           type: "object",
           properties: {
-            campaign: { type: "string", description: "Campaign name to stop syncing" },
+            campaign: { type: "string", description: "Campaign / job label to stop syncing" },
             automation_id: { type: "string", description: "Automation id if known" },
           },
           additionalProperties: false,
@@ -1649,30 +1706,112 @@ export async function runTool(
       throw new Error("Cannot start automation in this context");
     }
     ensureAutomationRunner();
-    const source = String(args.source || args.provider || "lemlist").toLowerCase();
-    if (source !== "lemlist" && source !== "brevo") {
-      throw new Error('source must be "lemlist" or "brevo"');
+    const rawSource = String(args.source || args.provider || "").trim();
+    const lower = rawSource.toLowerCase();
+    const integrationArg = String(
+      args.integration || args.integration_name || args.sourceIntegrationName || "",
+    ).trim();
+
+    let sourceProvider: "lemlist" | "brevo" | "other";
+    let sourceIntegrationName = "";
+
+    if (lower === "lemlist") {
+      sourceProvider = "lemlist";
+    } else if (lower === "brevo") {
+      sourceProvider = "brevo";
+    } else {
+      sourceProvider = "other";
+      sourceIntegrationName =
+        integrationArg ||
+        (lower && lower !== "other" && lower !== "custom" ? rawSource : "");
+      if (!sourceIntegrationName) {
+        throw new Error(
+          'For custom connectors pass integration (connected custom API name), or set source to that name',
+        );
+      }
+      const matched = integrations.find(
+        (item) =>
+          item.provider === "other" &&
+          item.name.toLowerCase() === sourceIntegrationName.toLowerCase(),
+      );
+      if (!matched) {
+        throw new Error(
+          `No custom API named "${sourceIntegrationName}" is connected. Connect it first, or use source lemlist/brevo.`,
+        );
+      }
+      sourceIntegrationName = matched.name;
     }
+
     const campaign = String(args.campaign || args.campaignName || "").trim();
     const attioList = String(args.attio_list || args.attioList || args.list || "").trim();
     if (!campaign) throw new Error("Campaign name is required");
     if (!attioList) throw new Error("Attio list name is required");
+
+    const pollPath = String(args.poll_path || args.pollPath || "").trim();
+    const stageMapRaw = args.stage_map || args.stageMap;
+    const stageMap =
+      stageMapRaw && typeof stageMapRaw === "object" && !Array.isArray(stageMapRaw)
+        ? Object.fromEntries(
+            Object.entries(stageMapRaw as Record<string, unknown>).map(([k, v]) => [
+              k,
+              String(v ?? ""),
+            ]),
+          )
+        : undefined;
+    const completedValuesRaw = args.completed_values || args.completedValues;
+    const recipe =
+      sourceProvider === "other"
+        ? {
+            pollPath,
+            method:
+              String(args.poll_method || args.pollMethod || "GET").toUpperCase() === "POST"
+                ? ("POST" as const)
+                : ("GET" as const),
+            body: args.poll_body ?? args.pollBody,
+            itemsPath: String(args.items_path || args.itemsPath || "").trim() || undefined,
+            emailField: String(args.email_field || args.emailField || "").trim() || undefined,
+            nameField: String(args.name_field || args.nameField || "").trim() || undefined,
+            stageField: String(args.stage_field || args.stageField || "").trim() || undefined,
+            defaultStage:
+              String(args.default_stage || args.defaultStage || args.stage_open || "").trim() ||
+              undefined,
+            stageMap,
+            completedPath:
+              String(args.completed_path || args.completedPath || "").trim() || undefined,
+            completedValues: Array.isArray(completedValuesRaw)
+              ? completedValuesRaw.map((item) => String(item || "").trim()).filter(Boolean)
+              : undefined,
+          }
+        : undefined;
+
+    if (sourceProvider === "other" && !pollPath) {
+      throw new Error(
+        "For custom connectors, poll_path is required (path or URL that returns people/leads). Probe with custom_api_request first if unsure.",
+      );
+    }
+
     context.onStatus?.(`Starting automatic updates for ${campaign}…`);
     const automation = await startCampaignAutomation({
       userId: context.userId,
       projectId: context.projectId,
-      sourceProvider: source,
+      sourceProvider,
+      sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
       campaignName: campaign,
       attioList,
       stageOpen: String(args.stage_open || args.stageOpen || "open"),
       stageClick: String(args.stage_click || args.stageClick || "click"),
       stageReply: String(args.stage_reply || args.stageReply || "hot"),
       intervalMinutes: Number(args.interval_minutes || args.intervalMinutes) || 2,
+      recipe,
     });
+    const fromLabel =
+      automation.sourceProvider === "other"
+        ? automation.sourceIntegrationName || "custom API"
+        : automation.sourceProvider;
     return clip({
       ok: true,
       automation,
-      note: `Automatic update is running. Attio list "${automation.attioList}" will keep syncing from ${automation.sourceProvider} campaign "${automation.campaignName}" until the campaign completes (or you stop it).`,
+      note: `Automatic update is running. Attio list "${automation.attioList}" will keep syncing from ${fromLabel} · "${automation.campaignName}" until the source completes (or you stop it).`,
     });
   }
 

@@ -18,15 +18,19 @@ const AutomationSchema = new Schema(
     title: { type: String, required: true, trim: true },
     sourceProvider: {
       type: String,
-      enum: ["lemlist", "brevo"],
+      enum: ["lemlist", "brevo", "other"],
       required: true,
     },
+    /** Display / lookup name for custom (`other`) integrations. */
+    sourceIntegrationName: { type: String, default: "", trim: true },
     campaignName: { type: String, required: true, trim: true },
     attioList: { type: String, required: true, trim: true },
     stageOpen: { type: String, default: "open" },
     stageClick: { type: String, default: "click" },
     stageReply: { type: String, default: "hot" },
     intervalMinutes: { type: Number, default: 2, min: 1, max: 60 },
+    /** Poll recipe for custom / other connectors. */
+    recipe: { type: Schema.Types.Mixed, default: undefined },
     nextRunAt: { type: Date, default: Date.now, index: true },
     lastRunAt: { type: Date },
     lastSummary: { type: String, default: "" },

@@ -99,9 +99,11 @@ function providerGuide(integrations: StoredIntegration[]) {
   if (integrations.some((item) => item.provider === "other")) {
     const custom = integrations.filter((item) => item.provider === "other");
     const known = knownCustomApiGuide(custom);
-    parts.push(`Custom APIs are connected. Use custom_api_request to finish the user's task against those APIs.
+    const names = custom.map((item) => item.name).join(", ");
+    parts.push(`Custom APIs are connected (${names}). Use custom_api_request to finish the user's task against those APIs.
 - SmartLead (name/base contains smartlead): the server adds ?api_key= automatically. Call paths like /campaigns or /campaigns/{id}/analytics. Base URL should be https://server.smartlead.ai/api/v1. Never put the API key in the path yourself.
-- MailBluster: base https://api.mailbluster.com; Authorization header is the raw API key (no Bearer). Developer API is Leads/Fields/Products/Orders only — NO campaign send/open/click/bounce reports. Do not invent campaign endpoints; tell the user to use Brevo, Lemlist, or SmartLead for campaign analytics.${known ? `\n${known}` : ""}`);
+- MailBluster: base https://api.mailbluster.com; Authorization header is the raw API key (no Bearer). Developer API is Leads/Fields/Products/Orders only — NO campaign send/open/click/bounce reports. Do not invent campaign endpoints; tell the user to use Brevo, Lemlist, or SmartLead for campaign analytics.
+- Background auto-sync into Attio works for these custom APIs too: probe the people/leads endpoint with custom_api_request, then call start_campaign_automation with source "other" (or the integration name), integration, campaign label, attio_list, and recipe fields (poll_path, items_path, email_field, stage_field, optional completed_path). Do not claim custom connectors cannot auto-sync.${known ? `\n${known}` : ""}`);
   }
   return parts.join("\n");
 }
@@ -234,7 +236,7 @@ Rules:
 - After a successful connect, continue with their original request using the new tools in the same turn when possible.
 - Never repeat a full API key in your reply. Confirm with the last 4 characters only (key hint).
 - If they ask what is connected, call list_integrations. If they ask to remove one, call disconnect_integration.
-- If the user asks to keep updating / continue updating / auto-update Attio from a running Lemlist or Brevo campaign until it completes: call start_campaign_automation (source, campaign, attio_list). Tell them automatic updates are running and will keep syncing in the background until the campaign ends (or they ask to stop). Use list_automations / stop_automation when they ask about or stop that job.
+- If the user asks to keep updating / continue updating / auto-update / watch Attio from a running campaign or any connected source until it completes: call start_campaign_automation. Lemlist/Brevo: source + campaign + attio_list. Custom APIs (Unified Portal, SmartLead, etc.): probe with custom_api_request if needed, then start with source other (or the integration name), integration, campaign label, attio_list, and recipe (poll_path + field mapping; optional completed_path). Tell them automatic updates are running until the source completes or they stop it. Use list_automations / stop_automation when they ask about or stop that job. Never say only Lemlist/Brevo support background sync.
 - If the needed API is not connected and they did not provide a key:
   - For Notion: call start_oauth_connect (Connect button).
   - For others: ask them to paste the API key here in chat (or use Integrations).

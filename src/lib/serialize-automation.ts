@@ -1,15 +1,37 @@
+export type SyncRecipe = {
+  pollPath: string;
+  method?: "GET" | "POST";
+  body?: unknown;
+  /** Dot path to the array of people/leads, e.g. "data.leads" or "leads". */
+  itemsPath?: string;
+  emailField?: string;
+  nameField?: string;
+  stageField?: string;
+  defaultStage?: string;
+  /** Map raw status values → Attio stage names. */
+  stageMap?: Record<string, string>;
+  /** Dot path to a status/completion field on the poll response. */
+  completedPath?: string;
+  /** If the completedPath value matches one of these (case-insensitive), the job completes. */
+  completedValues?: string[];
+};
+
+export type AutomationSourceProvider = "lemlist" | "brevo" | "other";
+
 export type AutomationDTO = {
   _id: string;
   type: string;
   status: "running" | "paused" | "completed" | "failed" | "stopped";
   title: string;
-  sourceProvider: "lemlist" | "brevo";
+  sourceProvider: AutomationSourceProvider;
+  sourceIntegrationName: string;
   campaignName: string;
   attioList: string;
   stageOpen: string;
   stageClick: string;
   stageReply: string;
   intervalMinutes: number;
+  recipe: SyncRecipe | null;
   nextRunAt: string;
   lastRunAt: string;
   lastSummary: string;
@@ -17,36 +39,75 @@ export type AutomationDTO = {
   error: string;
 };
 
+function serializeRecipe(raw: unknown): SyncRecipe | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const pollPath = String(r.pollPath || "").trim();
+  if (!pollPath) return null;
+  const stageMapRaw = r.stageMap;
+  let stageMap: Record<string, string> | undefined;
+  if (stageMapRaw && typeof stageMapRaw === "object") {
+    stageMap = {};
+    for (const [key, value] of Object.entries(stageMapRaw as Record<string, unknown>)) {
+      stageMap[key] = String(value ?? "");
+    }
+  }
+  const method = String(r.method || "GET").toUpperCase();
+  return {
+    pollPath,
+    method: method === "POST" ? "POST" : "GET",
+    body: r.body,
+    itemsPath: String(r.itemsPath || "").trim() || undefined,
+    emailField: String(r.emailField || "").trim() || undefined,
+    nameField: String(r.nameField || "").trim() || undefined,
+    stageField: String(r.stageField || "").trim() || undefined,
+    defaultStage: String(r.defaultStage || "").trim() || undefined,
+    stageMap,
+    completedPath: String(r.completedPath || "").trim() || undefined,
+    completedValues: Array.isArray(r.completedValues)
+      ? r.completedValues.map((item) => String(item || "").trim()).filter(Boolean)
+      : undefined,
+  };
+}
+
 export function serializeAutomation(doc: {
   _id: unknown;
   type?: string;
   status: AutomationDTO["status"];
   title: string;
-  sourceProvider: AutomationDTO["sourceProvider"];
+  sourceProvider: string;
+  sourceIntegrationName?: string;
   campaignName: string;
   attioList: string;
   stageOpen?: string;
   stageClick?: string;
   stageReply?: string;
   intervalMinutes?: number;
+  recipe?: unknown;
   nextRunAt?: Date;
   lastRunAt?: Date;
   lastSummary?: string;
   runCount?: number;
   error?: string;
 }): AutomationDTO {
+  const sourceProvider =
+    doc.sourceProvider === "brevo" || doc.sourceProvider === "other"
+      ? doc.sourceProvider
+      : "lemlist";
   return {
     _id: String(doc._id),
     type: doc.type || "campaign_to_attio",
     status: doc.status,
     title: doc.title,
-    sourceProvider: doc.sourceProvider,
+    sourceProvider,
+    sourceIntegrationName: doc.sourceIntegrationName || "",
     campaignName: doc.campaignName,
     attioList: doc.attioList,
     stageOpen: doc.stageOpen || "open",
     stageClick: doc.stageClick || "click",
     stageReply: doc.stageReply || "hot",
     intervalMinutes: doc.intervalMinutes || 2,
+    recipe: serializeRecipe(doc.recipe),
     nextRunAt: doc.nextRunAt ? new Date(doc.nextRunAt).toISOString() : "",
     lastRunAt: doc.lastRunAt ? new Date(doc.lastRunAt).toISOString() : "",
     lastSummary: doc.lastSummary || "",

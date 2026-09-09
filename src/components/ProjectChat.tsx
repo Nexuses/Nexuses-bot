@@ -509,7 +509,10 @@ export function ProjectChat({
                     Automatic update running
                   </p>
                   <p className="mt-1 truncate text-xs text-muted">
-                    {item.sourceProvider} · {item.campaignName} → Attio “{item.attioList}”
+                    {item.sourceProvider === "other"
+                      ? item.sourceIntegrationName || "custom API"
+                      : item.sourceProvider}{" "}
+                    · {item.campaignName} → Attio “{item.attioList}”
                     {item.lastSummary ? ` · ${item.lastSummary}` : ""}
                   </p>
                 </div>
