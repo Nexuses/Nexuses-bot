@@ -206,8 +206,9 @@ export function IntegrationsPanel({
                     />
                     {item.provider === "brevo" ? (
                       <p className="text-xs text-muted">
-                        Paste only the key itself (no Bearer). Standard keys work for REST; MCP keys need
-                        “Create MCP server API key” enabled in Brevo → SMTP &amp; API.
+                        Paste only the raw key (no Bearer). If connect fails with 401, authorize this
+                        server’s IP in Brevo → Settings → Security → Authorized IPs (or disable API IP
+                        blocking). MCP keys need “Create MCP server API key” enabled.
                       </p>
                     ) : null}
                     <PrimaryButton type="submit" tone="sea" disabled={busy === item.provider}>

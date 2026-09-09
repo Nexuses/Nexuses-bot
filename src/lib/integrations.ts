@@ -95,7 +95,7 @@ export function normalizeMcpUrl(raw: string) {
   }
 }
 
-/** Strip Bearer / api-key prefixes and invisible chars people paste from Brevo configs. */
+/** Strip Bearer / api-key prefixes, whitespace, and invisible chars people paste from Brevo configs. */
 export function normalizeBrevoApiKey(raw: string) {
   let key = String(raw || "")
     .trim()
@@ -105,6 +105,8 @@ export function normalizeBrevoApiKey(raw: string) {
   key = key.replace(/^\s*authorization\s*:\s*/i, "").trim();
   key = key.replace(/^bearer\s+/i, "").trim();
   key = key.replace(/^\s*api[_-]?key\s*[:=]\s*/i, "").trim();
+  // API keys never contain spaces/newlines; paste artifacts break the header and cause 401.
+  key = key.replace(/\s+/g, "");
   return key;
 }
 
@@ -114,6 +116,19 @@ export function isLikelyApiAuthRejection(message: string) {
   if (/unauthorized/i.test(text) && !/cloudflare|<!doctype|html>/i.test(text)) return true;
   // Do not treat generic 403/proxy/WAF pages as an invalid API key.
   return false;
+}
+
+/** Brevo returns 401 for unknown server IPs — that is not a bad key. */
+export function isBrevoIpAuthorizationError(message: string) {
+  return /ip not authorized|unauthori[sz]ed:\s*ip|unrecognised ip|unrecognized ip|not verified|unknown ip|authorize.*(ip|address)|blocked.*ip/i.test(
+    message || "",
+  );
+}
+
+export function brevoKeyHint(apiKey: string) {
+  const key = apiKey.trim();
+  if (key.length < 8) return `(len ${key.length})`;
+  return `${key.slice(0, 6)}…${key.slice(-4)} (len ${key.length})`;
 }
 
 export { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";

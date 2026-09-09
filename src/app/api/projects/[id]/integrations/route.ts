@@ -1,6 +1,7 @@
 import { jsonError } from "@/lib/api";
 import {
   displayProviderName,
+  isBrevoIpAuthorizationError,
   isLikelyApiAuthRejection,
   looksLikeQueryApiKeyAuth,
   normalizeBrevoApiKey,
@@ -130,6 +131,9 @@ export async function POST(request: Request, { params }: Params) {
     return ok({ integration }, 201);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not save integration";
+    if (isBrevoIpAuthorizationError(message) || message.includes("Authorized IPs")) {
+      return jsonError(message, 400);
+    }
     if (isLikelyApiAuthRejection(message)) {
       return jsonError(
         message.includes("Brevo")

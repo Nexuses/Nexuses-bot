@@ -29,6 +29,8 @@ import {
   upsertIntegrationDoc,
   maskKey,
   isLikelyApiAuthRejection,
+  isBrevoIpAuthorizationError,
+  brevoKeyHint,
 } from "@/lib/integrations";
 import { knownCustomApiGuide } from "@/lib/known-custom-apis";
 import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
@@ -2318,6 +2320,11 @@ export async function validateIntegration(input: {
   if (input.provider === "brevo") {
     const apiKey = normalizeBrevoApiKey(input.apiKey);
     if (!apiKey) throw new Error("Brevo API key is required");
+    if (/^xsmtpsib-/i.test(apiKey)) {
+      throw new Error(
+        "That looks like a Brevo SMTP key, not an API key. Create an API key under Settings → SMTP & API → API Keys.",
+      );
+    }
 
     let restError: Error | null = null;
     try {
@@ -2335,11 +2342,27 @@ export async function validateIntegration(input: {
     } catch (mcpErr) {
       const mcpMessage = mcpErr instanceof Error ? mcpErr.message : String(mcpErr);
       const restMessage = restError?.message || "";
+      const combined = `${restMessage}\n${mcpMessage}`;
+      if (isBrevoIpAuthorizationError(combined)) {
+        let outboundIp = "";
+        try {
+          const ipRes = await fetch("https://api.ipify.org?format=json", { cache: "no-store" });
+          if (ipRes.ok) {
+            const data = (await ipRes.json()) as { ip?: string };
+            outboundIp = String(data.ip || "").trim();
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(
+          `Brevo blocked this server IP (key ${brevoKeyHint(apiKey)} looks fine). In Brevo go to Settings → Security → Authorized IPs, authorize ${outboundIp || "this server’s public IP"}, or turn off API IP blocking. Also check email for “Validate your IP address”. Rest: ${restMessage.slice(0, 180)}`,
+        );
+      }
       const restAuth = isLikelyApiAuthRejection(restMessage);
       const mcpAuth = isLikelyApiAuthRejection(mcpMessage);
       if (restAuth && mcpAuth) {
         throw new Error(
-          "Brevo rejected this key. Paste only the raw key (no “Bearer” or “api-key:” prefix). Create a standard API key or an MCP key under Settings → SMTP & API → API Keys (enable “Create MCP server API key” for MCP).",
+          `Brevo returned 401 for this key ${brevoKeyHint(apiKey)}. If the key is correct, Brevo is often blocking the server IP — Settings → Security → Authorized IPs (or disable API IP blocking). Use a standard API key (xkeysib-…) or an MCP key from SMTP & API. Details: REST ${restMessage.slice(0, 120)} | MCP ${mcpMessage.slice(0, 120)}`,
         );
       }
       if (!restAuth && restError) {
