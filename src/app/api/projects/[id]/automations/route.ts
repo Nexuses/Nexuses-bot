@@ -67,10 +67,13 @@ export async function POST(request: Request, { params }: Params) {
       const kindRaw = String(
         body.campaignKind || body.campaign_kind || body.kind || body.recipe?.campaignKind || "",
       ).toLowerCase();
-      const looksUnified = /unified(\s*portal)?|unified\.nexuses|nexuses\.xyz/i.test(
+      const looksUnified = /unified(\s*portal)?|unified\.nexuses\.xyz/i.test(
         sourceIntegrationName,
       );
-      if (!pollPath && !looksUnified) {
+      const looksOutreach = /outreach|1-?1\s*tool|nexuses\s*1-?1|outreachcampaign\.nexuses/i.test(
+        sourceIntegrationName,
+      );
+      if (!pollPath && !looksUnified && !looksOutreach) {
         return jsonError("pollPath is required for custom connector sync");
       }
       const stageMapRaw = body.stageMap || body.stage_map || body.recipe?.stageMap;

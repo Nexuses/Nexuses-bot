@@ -21,6 +21,11 @@ import {
   isUnifiedPortal,
   resolveUnifiedPortalCampaign,
 } from "@/lib/unified-portal";
+import {
+  collectOutreachPeople,
+  isNexusesOutreach,
+  resolveOutreachCampaign,
+} from "@/lib/nexuses-outreach";
 import type { AuthType } from "@/types/chat";
 
 const ATTIO = "https://api.attio.com";
@@ -587,6 +592,60 @@ async function syncUnifiedPortalSource(job: {
   };
 }
 
+async function syncOutreachSource(job: {
+  userId: string;
+  projectId: string;
+  sourceIntegrationName: string;
+  campaignName: string;
+  attioList: string;
+  stageOpen: string;
+  stageClick: string;
+  stageReply: string;
+}) {
+  const integration = await getCustomIntegration(
+    job.userId,
+    job.projectId,
+    job.sourceIntegrationName,
+  );
+  const attio = await getIntegration(job.userId, job.projectId, "attio");
+  const list = await resolveAttioList(attio.apiKey, job.attioList);
+
+  const campaign = await resolveOutreachCampaign(
+    integration.apiKey,
+    integration.baseUrl,
+    job.campaignName,
+  );
+
+  const { people, counts } = await collectOutreachPeople({
+    apiKey: integration.apiKey,
+    baseUrl: integration.baseUrl,
+    campaignId: campaign.id,
+    stageOpen: job.stageOpen || "open",
+    stageClick: job.stageClick || "click",
+    stageReply: job.stageReply || "bounced",
+  });
+
+  let updated = 0;
+  let failed = 0;
+  for (const person of people.slice(0, 500)) {
+    try {
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+      updated += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+
+  const completed = /^(completed|paused|auto_paused)$/i.test(campaign.status);
+  // Only auto-stop on completed — paused jobs stay running so resume keeps syncing.
+  const done = campaign.status === "completed";
+  return {
+    completed: done,
+    campaignStatus: campaign.status || "running",
+    summary: `Outreach 1-1 · ${campaign.name}: synced ${updated} to ${list.name} (${counts.opens} opens, ${counts.clicks} clicks, ${counts.bounced} bounces)${failed ? `; ${failed} failed` : ""}. Status: ${campaign.status || "unknown"}${completed && !done ? " (still syncing while paused)" : ""}.`,
+  };
+}
+
 async function syncRecipeSource(job: {
   userId: string;
   projectId: string;
@@ -615,6 +674,19 @@ async function syncRecipeSource(job: {
       stageClick: job.stageClick || "click",
       stageReply: job.stageReply || "unsubscribed",
       recipe: job.recipe,
+    });
+  }
+
+  if (isNexusesOutreach(integration)) {
+    return syncOutreachSource({
+      userId: job.userId,
+      projectId: job.projectId,
+      sourceIntegrationName: job.sourceIntegrationName,
+      campaignName: job.campaignName,
+      attioList: job.attioList,
+      stageOpen: job.stageOpen,
+      stageClick: job.stageClick || "click",
+      stageReply: job.stageReply || "bounced",
     });
   }
 
@@ -776,6 +848,11 @@ export async function startCampaignAutomation(input: {
         method: "POST",
         campaignKind: kind === "drip" || kind === "oneone" ? kind : undefined,
       };
+    } else if (isNexusesOutreach(custom)) {
+      recipe = {
+        pollPath: "/api/v1/campaigns",
+        method: "GET",
+      };
     } else {
       recipe = normalizeRecipe(input.recipe);
     }
@@ -801,7 +878,8 @@ export async function startCampaignAutomation(input: {
 
   const defaultInterval =
     sourceProvider === "other" &&
-    isUnifiedPortal({ name: sourceIntegrationName })
+    (isUnifiedPortal({ name: sourceIntegrationName }) ||
+      isNexusesOutreach({ name: sourceIntegrationName }))
       ? 1
       : 2;
 

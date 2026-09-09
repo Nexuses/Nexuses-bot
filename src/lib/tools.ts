@@ -962,7 +962,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "start_campaign_automation",
         description:
-          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal (built-in), AND other custom APIs. Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. Lemlist/Brevo: source + campaign + attio_list. Unified Portal: source/integration = connected name, campaign, attio_list, optional campaign_kind — poll_path NOT required (runner calls process-due + syncs opens/clicks). Other custom APIs: pass recipe poll_path + field mapping.",
+          "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal, Nexuses Outreach 1-1 (built-in), AND other custom APIs. Use when the user says keep updating, continue syncing, auto-update, watch, or until complete. Requires Attio connected. Lemlist/Brevo: source + campaign + attio_list. Unified Portal / Outreach 1-1: source/integration = connected name, campaign, attio_list — poll_path NOT required. Other custom APIs: pass recipe poll_path + field mapping.",
         parameters: {
           type: "object",
           properties: {
@@ -1801,10 +1801,15 @@ export async function runTool(
       );
       const unified =
         matched &&
-        /unified(\s*portal)?|unified\.nexuses|nexuses\.xyz/i.test(
+        /unified(\s*portal)?|unified\.nexuses\.xyz/i.test(
           `${matched.name} ${matched.baseUrl || ""}`,
         );
-      if (!unified) {
+      const outreach =
+        matched &&
+        /outreach|1-?1\s*tool|nexuses\s*1-?1|outreachcampaign\.nexuses/i.test(
+          `${matched.name} ${matched.baseUrl || ""}`,
+        );
+      if (!unified && !outreach) {
         throw new Error(
           "For custom connectors, poll_path is required (path or URL that returns people/leads). Probe with custom_api_request first if unsure.",
         );

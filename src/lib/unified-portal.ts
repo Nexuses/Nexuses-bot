@@ -5,7 +5,7 @@ export const UNIFIED_PORTAL_BASE = "https://unified.nexuses.xyz";
 
 export function isUnifiedPortal(input: { name?: string; baseUrl?: string }) {
   const hay = `${input.name || ""} ${input.baseUrl || ""}`;
-  return /unified(\s*portal)?|unified\.nexuses|nexuses\.xyz/i.test(hay);
+  return /unified(\s*portal)?|unified\.nexuses\.xyz/i.test(hay);
 }
 
 export function unifiedPortalBaseUrl(baseUrl?: string) {

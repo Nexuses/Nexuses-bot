@@ -12,6 +12,7 @@ import { useRouter } from "next/navigation";
 import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { IntegrationsPanel } from "@/components/IntegrationsPanel";
+import { AutomationsPanel } from "@/components/AutomationsPanel";
 import type { AutomationDTO } from "@/lib/serialize-automation";
 import type { ChatAttachment, ChatMessageDTO, ChatThreadDTO, IntegrationDTO } from "@/types/chat";
 import type { ProjectDTO, SessionUser } from "@/types";
@@ -144,6 +145,7 @@ export function ProjectChat({
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
+  const [automationsOpen, setAutomationsOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [automations, setAutomations] = useState<AutomationDTO[]>([]);
@@ -188,9 +190,12 @@ export function ProjectChat({
 
   useEffect(() => {
     void refreshAutomations();
-    const timer = setInterval(() => void refreshAutomations(), 15_000);
+    const timer = setInterval(
+      () => void refreshAutomations(),
+      automationsOpen ? 5_000 : 15_000,
+    );
     return () => clearInterval(timer);
-  }, [project._id]);
+  }, [project._id, automationsOpen]);
 
   useEffect(() => {
     if (!busy) void refreshAutomations();
@@ -482,11 +487,23 @@ export function ProjectChat({
           </div>
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => setPanelOpen(true)}
               className="rounded-full border border-line px-4 py-2 text-sm text-sea hover:border-sea"
             >
               Integrations
               {integrations.length ? ` · ${integrations.length}` : ""}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void refreshAutomations();
+                setAutomationsOpen(true);
+              }}
+              className="rounded-full border border-line px-4 py-2 text-sm text-sea hover:border-sea"
+            >
+              Automations
+              {runningAutomations.length ? ` · ${runningAutomations.length}` : ""}
             </button>
           </div>
         </div>
@@ -742,6 +759,15 @@ export function ProjectChat({
           integrations={integrations}
           onChange={setIntegrations}
           onClose={() => setPanelOpen(false)}
+        />
+      ) : null}
+      {automationsOpen ? (
+        <AutomationsPanel
+          automations={automations}
+          stoppingId={stoppingId}
+          onStop={(item) => void stopRunningAutomation(item)}
+          onRefresh={() => void refreshAutomations()}
+          onClose={() => setAutomationsOpen(false)}
         />
       ) : null}
       </div>
