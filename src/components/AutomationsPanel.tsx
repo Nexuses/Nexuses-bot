@@ -116,6 +116,11 @@ export function AutomationsPanel({
                           <p className="mt-1 text-xs text-muted">
                             {sourceLabel(item)} · {item.campaignName} → Attio “{item.attioList}”
                           </p>
+                          {item.webhookUrl ? (
+                            <p className="mt-2 break-all rounded-xl border border-line bg-ink/40 px-2 py-1.5 font-mono text-[10px] text-muted">
+                              {item.webhookUrl}
+                            </p>
+                          ) : null}
                         </div>
                         <span
                           className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${statusTone(item.status)}`}

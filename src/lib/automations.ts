@@ -33,6 +33,13 @@ import {
   isNexusesOutreach,
   resolveOutreachCampaign,
 } from "@/lib/nexuses-outreach";
+import {
+  isSmartLead,
+  normalizeSmartleadEvent,
+  registerSmartleadWebhook,
+  smartleadWebhookPublicUrl,
+  stageFromSmartleadEvent,
+} from "@/lib/smartlead-webhooks";
 import type { AuthType } from "@/types/chat";
 
 const ATTIO = "https://api.attio.com";
@@ -749,6 +756,14 @@ async function syncRecipeSource(job: {
     });
   }
 
+  if (isSmartLead(integration)) {
+    return {
+      completed: false,
+      campaignStatus: "listening",
+      summary: `SmartLead → Attio “${job.attioList}”: listening for webhooks (EMAIL_SENT / EMAIL_OPEN / EMAIL_LINK_CLICK / EMAIL_REPLY). API polling does not provide reliable open/click/sent — keep the webhook URL active.`,
+    };
+  }
+
   const recipe = normalizeRecipe(job.recipe);
   const attio = await getIntegration(job.userId, job.projectId, "attio");
   const list = await resolveAttioList(attio.apiKey, job.attioList);
@@ -925,16 +940,22 @@ export async function startCampaignAutomation(input: {
     } else if (isNexusesOutreach(custom)) {
       if (watchAll) {
         throw new Error(
-          "Watch-all mode is only supported for Unified Portal right now. Pass a specific Outreach campaign name.",
+          "Watch-all mode is only supported for Unified Portal and SmartLead. Pass a specific Outreach campaign name.",
         );
       }
       recipe = {
         pollPath: "/api/v1/campaigns",
         method: "GET",
       };
+    } else if (isSmartLead(custom)) {
+      recipe = {
+        pollPath: "/campaigns",
+        method: "GET",
+        watchAll,
+      };
     } else {
       if (watchAll) {
-        throw new Error("watch_all requires Unified Portal");
+        throw new Error("watch_all requires Unified Portal or SmartLead");
       }
       recipe = normalizeRecipe(input.recipe);
     }
@@ -946,7 +967,9 @@ export async function startCampaignAutomation(input: {
   const label =
     sourceProvider === "other" ? sourceIntegrationName || "custom API" : sourceProvider;
   const title = watchAll
-    ? `Watch Unified Portal → Attio “${input.attioList}”`
+    ? isSmartLead({ name: sourceIntegrationName })
+      ? `Watch SmartLead → Attio “${input.attioList}”`
+      : `Watch Unified Portal → Attio “${input.attioList}”`
     : `Auto-update Attio from ${label} · ${campaignName}`;
 
   const existing = await Automation.findOne({
@@ -960,13 +983,21 @@ export async function startCampaignAutomation(input: {
     status: "running",
   });
   if (existing) {
-    return serializeAutomation(existing);
+    const existingDto = serializeAutomation(existing);
+    if (existing.webhookToken && isSmartLead({ name: existing.sourceIntegrationName })) {
+      return {
+        ...existingDto,
+        lastSummary: `${existingDto.lastSummary || ""} Webhook URL: ${smartleadWebhookPublicUrl(existing.webhookToken)}`.trim(),
+      };
+    }
+    return existingDto;
   }
 
   const defaultInterval =
     sourceProvider === "other" &&
     (isUnifiedPortal({ name: sourceIntegrationName }) ||
-      isNexusesOutreach({ name: sourceIntegrationName }))
+      isNexusesOutreach({ name: sourceIntegrationName }) ||
+      isSmartLead({ name: sourceIntegrationName }))
       ? 1
       : 2;
 
@@ -974,6 +1005,7 @@ export async function startCampaignAutomation(input: {
   let webhookSecret = "";
   let portalWebhookId = "";
   let webhookNote = "";
+  let smartleadWebhookUrl = "";
 
   if (watchAll && isUnifiedPortal({ name: sourceIntegrationName })) {
     const custom = await getCustomIntegration(input.userId, input.projectId, sourceIntegrationName);
@@ -990,6 +1022,23 @@ export async function startCampaignAutomation(input: {
     } catch (err) {
       webhookToken = "";
       webhookNote = ` Webhook skipped: ${err instanceof Error ? err.message : "could not register"}. Polling updatedSince still runs.`;
+    }
+  } else if (isSmartLead({ name: sourceIntegrationName })) {
+    // SmartLead API often lacks open/click/sent — webhooks are the source of truth.
+    const custom = await getCustomIntegration(input.userId, input.projectId, sourceIntegrationName);
+    webhookToken = makeWebhookReceiveToken();
+    smartleadWebhookUrl = smartleadWebhookPublicUrl(webhookToken);
+    try {
+      await registerSmartleadWebhook({
+        apiKey: custom.apiKey,
+        baseUrl: custom.baseUrl,
+        webhookUrl: smartleadWebhookUrl,
+        name: `Nexuses · ${input.attioList}`,
+        campaignId: watchAll ? undefined : undefined,
+      });
+      webhookNote = ` Paste this URL in SmartLead webhooks if not auto-saved: ${smartleadWebhookUrl}`;
+    } catch (err) {
+      webhookNote = ` Paste this webhook URL in SmartLead (API register failed: ${err instanceof Error ? err.message.slice(0, 120) : "error"}): ${smartleadWebhookUrl}`;
     }
   }
 
@@ -1162,6 +1211,74 @@ export async function handleUnifiedWebhookToken(input: {
   job.error = "";
   await job.save();
   return { ok: true as const, updated, type };
+}
+
+/** SmartLead webhooks (token in URL; no HMAC). Maps sent/open/click/reply → Attio. */
+export async function handleSmartleadWebhookToken(input: {
+  token: string;
+  rawBody: string;
+}) {
+  await dbConnect();
+  const job = await Automation.findOne({
+    webhookToken: input.token,
+    status: "running",
+  });
+  if (!job) return { ok: false, error: "Unknown webhook" as const };
+
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(input.rawBody) as Record<string, unknown>;
+  } catch {
+    return { ok: false, error: "Invalid JSON" as const };
+  }
+
+  const normalized = normalizeSmartleadEvent(payload);
+  const stage = stageFromSmartleadEvent(normalized.rawType, {
+    open: job.stageOpen || "open",
+    click: job.stageClick || "click",
+    reply: job.stageReply || "hot",
+    sent: "sent",
+  });
+
+  if (!stage) {
+    return { ok: true as const, updated: 0, type: normalized.rawType || "ignored" };
+  }
+
+  if (!normalized.email.includes("@")) {
+    return { ok: false, error: "Missing email in payload" as const };
+  }
+
+  // Single-campaign jobs only accept matching campaign names (watch-all accepts all).
+  if (!job.watchAll && job.campaignName && job.campaignName !== "*") {
+    const wanted = job.campaignName.toLowerCase();
+    const got = normalized.campaignName.toLowerCase();
+    if (got && got !== wanted && !got.includes(wanted) && !wanted.includes(got)) {
+      return { ok: true as const, updated: 0, type: normalized.rawType, skipped: "campaign mismatch" };
+    }
+  }
+
+  const attio = await getIntegration(String(job.userId), String(job.projectId), "attio");
+  const list = await resolveAttioList(attio.apiKey, job.attioList);
+  try {
+    await upsertAttioPerson(
+      attio.apiKey,
+      list.id,
+      list.stageSlug,
+      { email: normalized.email, name: normalized.name },
+      stage,
+    );
+  } catch (err) {
+    job.lastRunAt = new Date();
+    job.error = err instanceof Error ? err.message : "Attio upsert failed";
+    await job.save();
+    return { ok: false, error: job.error };
+  }
+
+  job.lastRunAt = new Date();
+  job.lastSummary = `SmartLead ${normalized.rawType || "event"}: ${normalized.email} → ${stage} in “${list.name}”${normalized.campaignName ? ` (${normalized.campaignName})` : ""}.`;
+  job.error = "";
+  await job.save();
+  return { ok: true as const, updated: 1, type: normalized.rawType };
 }
 
 export async function listAutomations(userId: string, projectId: string) {

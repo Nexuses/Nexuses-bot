@@ -37,8 +37,10 @@ export const KNOWN_CUSTOM_APIS: KnownCustomApi[] = [
     baseUrl: "https://server.smartlead.ai/api/v1",
     authType: "query",
     docsUrl: "https://api.smartlead.ai/authentication",
-    limits: "Campaigns, leads, and analytics are available via REST with ?api_key=.",
-    pathHints: "Examples: GET /campaigns, GET /campaigns/{id}/analytics",
+    limits:
+      "Auth: ?api_key= on every request (auto-attached). SmartLead REST often does NOT return reliable open/click/sent lists — use webhooks: EMAIL_SENT, EMAIL_OPEN, EMAIL_LINK_CLICK, EMAIL_REPLY, EMAIL_BOUNCE. Nexuses receives them at /api/webhooks/smartlead/{token} and syncs into Attio. Prefer start_campaign_automation with SmartLead + attio_list (campaign name or watch_all).",
+    pathHints:
+      "REST: GET /campaigns, GET /campaigns/{id}. Webhooks: create via POST /webhook/create or paste URL in SmartLead dashboard. Events: EMAIL_SENT, EMAIL_OPEN, EMAIL_LINK_CLICK, EMAIL_REPLY, EMAIL_BOUNCE, LEAD_UNSUBSCRIBED.",
   },
   {
     match: /mailbluster|mail.?bluster/i,

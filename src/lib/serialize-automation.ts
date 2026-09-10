@@ -1,3 +1,5 @@
+import { getAppOrigin } from "@/lib/html-shares";
+
 export type SyncRecipe = {
   pollPath: string;
   method?: "GET" | "POST";
@@ -38,6 +40,7 @@ export type AutomationDTO = {
   recipe: SyncRecipe | null;
   watchAll: boolean;
   webhookEnabled: boolean;
+  webhookUrl: string;
   nextRunAt: string;
   lastRunAt: string;
   lastSummary: string;
@@ -95,6 +98,7 @@ export function serializeAutomation(doc: {
   recipe?: unknown;
   watchAll?: boolean;
   webhookToken?: string;
+  webhookSecret?: string;
   nextRunAt?: Date;
   lastRunAt?: Date;
   lastSummary?: string;
@@ -105,6 +109,14 @@ export function serializeAutomation(doc: {
     doc.sourceProvider === "brevo" || doc.sourceProvider === "other"
       ? doc.sourceProvider
       : "lemlist";
+  const token = String(doc.webhookToken || "").trim();
+  let webhookUrl = "";
+  if (token) {
+    const origin = getAppOrigin().replace(/\/$/, "");
+    webhookUrl = doc.webhookSecret
+      ? `${origin}/api/webhooks/unified/${token}`
+      : `${origin}/api/webhooks/smartlead/${token}`;
+  }
   return {
     _id: String(doc._id),
     type: doc.type || "campaign_to_attio",
@@ -120,7 +132,8 @@ export function serializeAutomation(doc: {
     intervalMinutes: doc.intervalMinutes || 2,
     recipe: serializeRecipe(doc.recipe),
     watchAll: Boolean(doc.watchAll || (doc.recipe as { watchAll?: boolean } | undefined)?.watchAll),
-    webhookEnabled: Boolean(doc.webhookToken),
+    webhookEnabled: Boolean(token),
+    webhookUrl,
     nextRunAt: doc.nextRunAt ? new Date(doc.nextRunAt).toISOString() : "",
     lastRunAt: doc.lastRunAt ? new Date(doc.lastRunAt).toISOString() : "",
     lastSummary: doc.lastSummary || "",
