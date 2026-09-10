@@ -350,6 +350,7 @@ export async function importBrevoCampaignsToAttio(input: {
 
   await mapPool(people, 2, async (person) => {
     if (input.shouldCancel?.()) throw new Error("Stopped by user");
+    await new Promise((r) => setTimeout(r, 120));
     try {
       await upsertPersonWithStage(
         input.attioApiKey,
