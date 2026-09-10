@@ -54,6 +54,7 @@ type ChatEvent = {
   userMessage?: ChatMessageDTO;
   chat?: ChatThreadDTO;
   integrations?: IntegrationDTO[];
+  job?: ChatJobDTO;
 };
 
 async function readChatEvents(res: Response, onEvent: (event: ChatEvent) => void) {
@@ -252,12 +253,13 @@ export function ProjectChat({
   useEffect(() => {
     void refreshAutomations();
     void refreshChatJobs();
+    const fast = automationsOpen || chatJobs.length > 0 || busy;
     const timer = setInterval(() => {
       void refreshAutomations();
       void refreshChatJobs();
-    }, automationsOpen || chatJobs.length ? 4_000 : 12_000);
+    }, fast ? 2_000 : 10_000);
     return () => clearInterval(timer);
-  }, [project._id, automationsOpen, activeChatId, chatJobs.length]);
+  }, [project._id, automationsOpen, activeChatId, chatJobs.length, busy]);
 
   useEffect(() => {
     if (!busy) {
@@ -267,8 +269,18 @@ export function ProjectChat({
   }, [busy, project._id]);
 
   const runningAutomations = automations.filter((item) => item.status === "running");
-  // Show strip for any live job in this chat, or project-wide if chat not selected yet.
   const activeJobs = chatJobs.filter((job) => job.status === "queued" || job.status === "running");
+
+  function upsertLiveJob(job: ChatJobDTO) {
+    knownJobIds.current.add(job._id);
+    setChatJobs((current) => {
+      const next = current.filter((item) => item._id !== job._id);
+      if (job.status === "queued" || job.status === "running") {
+        return [job, ...next];
+      }
+      return next;
+    });
+  }
 
   async function stopRunningAutomation(item: AutomationDTO) {
     setStoppingId(item._id);
@@ -596,7 +608,15 @@ export function ProjectChat({
       let streamError = "";
 
       await readChatEvents(res, (event) => {
-        if (event.type === "status" && event.text) setStatus(event.text);
+        if (event.type === "status" && event.text) {
+          setStatus(event.text);
+          if (/background|keeps running|Brevo→Attio|import/i.test(event.text)) {
+            void refreshChatJobs();
+          }
+        }
+        if (event.type === "chat_job" && event.job) {
+          upsertLiveJob(event.job);
+        }
         if (event.type === "integrations" && event.integrations) {
           setIntegrations(event.integrations);
         }
@@ -836,41 +856,9 @@ export function ProjectChat({
         </div>
       </header>
 
-      {runningAutomations.length || activeJobs.length ? (
+      {activeJobs.length ? (
         <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-3 sm:px-6">
           <div className="mx-auto flex max-w-4xl flex-col gap-2">
-            {runningAutomations.map((item) => (
-              <div
-                key={item._id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sea/40 bg-sea/10 px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <p className="flex items-center gap-2 text-sm font-medium text-paper">
-                    <span
-                      className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
-                      aria-hidden
-                    />
-                    Automatic update running
-                  </p>
-                  <p className="mt-1 truncate text-xs text-muted">
-                    {item.sourceProvider === "other"
-                      ? item.sourceIntegrationName || "custom API"
-                      : item.sourceProvider}{" "}
-                    · {item.campaignName} → Attio “{item.attioList}”
-                    {item.lastSummary ? ` · ${item.lastSummary}` : ""}
-                    {" · "}keeps running until complete
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={stoppingId === item._id}
-                  onClick={() => void stopRunningAutomation(item)}
-                  className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
-                >
-                  {stoppingId === item._id ? "Stopping…" : "Stop"}
-                </button>
-              </div>
-            ))}
             {activeJobs.map((job) => (
               <div
                 key={job._id}

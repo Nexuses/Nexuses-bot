@@ -834,6 +834,7 @@ async function attioImportToList(
       args: { ...args, list: listName },
       totalRows: rowCount,
     });
+    context.onChatJob?.(job);
     return clip({
       ok: true,
       background: true,
@@ -1764,6 +1765,17 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
 export type ToolContext = {
   files?: { name: string; text: string; summary?: string }[];
   onStatus?: (text: string) => void;
+  onChatJob?: (job: {
+    _id: string;
+    type: string;
+    status: string;
+    title: string;
+    chatId: string;
+    progressDone: number;
+    progressTotal: number;
+    lastSummary: string;
+    error: string;
+  }) => void;
   userId?: string;
   projectId?: string;
   chatId?: string;
@@ -2793,6 +2805,7 @@ export async function runTool(
       stageOpen: String(args.stage_open || args.stageOpen || "Open"),
       stageClick: String(args.stage_click || args.stageClick || "Click"),
     });
+    context.onChatJob?.(job);
     return clip({
       ok: true,
       background: true,

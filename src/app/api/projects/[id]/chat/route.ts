@@ -527,6 +527,7 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
                 result = await runTool(call.function.name, call.function.arguments, integrations, {
                   files: toolFilePayload(extracted),
                   onStatus: (statusText) => send({ type: "status", text: statusText }),
+                  onChatJob: (job) => send({ type: "chat_job", job }),
                   userId: session.userId,
                   projectId: id,
                   chatId: String(chat._id),
