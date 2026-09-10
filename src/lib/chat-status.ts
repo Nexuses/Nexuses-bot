@@ -64,6 +64,7 @@ export function statusForTool(name: string) {
     brevo_list_contacts: "Loading Brevo contacts…",
     brevo_list_campaigns: "Loading Brevo campaigns…",
     brevo_people_by_event: "Collecting people from the Brevo campaign…",
+    brevo_import_campaigns_to_attio: "Importing Brevo campaigns into Attio…",
     brevo_api: "Talking to Brevo…",
     lemlist_list_campaigns: "Loading Lemlist campaigns…",
     lemlist_people_by_event: "Collecting people from the campaign…",

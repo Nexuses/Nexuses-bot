@@ -10,7 +10,7 @@ import { Chat } from "@/models/Chat";
 export type ChatJobDTO = {
   _id: string;
   type: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "stopped";
   title: string;
   chatId: string;
   progressDone: number;
@@ -96,6 +96,43 @@ export async function enqueueAttioCsvImport(input: {
   return serializeChatJob(job);
 }
 
+export async function enqueueBrevoToAttioImport(input: {
+  userId: string;
+  projectId: string;
+  chatId: string;
+  campaigns: string[];
+  attioList: string;
+  stageProspect?: string;
+  stageOpen?: string;
+  stageClick?: string;
+}) {
+  await dbConnect();
+  const job = await ChatJob.create({
+    userId: input.userId,
+    projectId: input.projectId,
+    chatId: input.chatId,
+    type: "brevo_to_attio",
+    status: "queued",
+    title: `Brevo → Attio “${input.attioList}” (${input.campaigns.length} campaigns)`,
+    args: {
+      campaigns: input.campaigns,
+      attioList: input.attioList,
+      stageProspect: input.stageProspect || "Prospect",
+      stageOpen: input.stageOpen || "Open",
+      stageClick: input.stageClick || "Click",
+    },
+    progressDone: 0,
+    progressTotal: 0,
+    lastSummary: "Queued — exporting Brevo recipients via API, then updating Attio.",
+    nextRunAt: new Date(),
+  });
+
+  ensureChatJobRunner();
+  void processChatJobById(String(job._id));
+
+  return serializeChatJob(job);
+}
+
 async function updateJob(id: string, patch: Record<string, unknown>) {
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
@@ -130,25 +167,33 @@ export async function processChatJobById(jobId: string) {
   try {
     if (job.type === "attio_csv_import") {
       await runAttioCsvImportJob(job);
+    } else if (job.type === "brevo_to_attio") {
+      await runBrevoToAttioJob(job);
     } else {
       throw new Error(`Unknown job type: ${job.type}`);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Job failed";
+    const stopped = /stopped by user/i.test(message);
     await updateJob(jobId, {
-      status: "failed",
+      status: stopped ? "stopped" : "failed",
       error: message,
       lastSummary: message,
       finishedAt: new Date(),
     });
-    await postJobMessage({
-      userId: String(job.userId),
-      projectId: String(job.projectId),
-      chatId: String(job.chatId),
-      content: `**Background import failed:** ${message}\n\nYou can re-attach the CSV and ask again — the job keeps running in the background next time until it finishes.`,
-      toolsUsed: ["attio_import_to_list"],
-      jobId,
-    });
+    if (!stopped) {
+      await postJobMessage({
+        userId: String(job.userId),
+        projectId: String(job.projectId),
+        chatId: String(job.chatId),
+        content: `**Background import failed:** ${message}\n\nAsk me to retry — the import runs via API in the background until it finishes.`,
+        toolsUsed:
+          job.type === "brevo_to_attio"
+            ? ["brevo_import_campaigns_to_attio"]
+            : ["attio_import_to_list"],
+        jobId,
+      });
+    }
   } finally {
     g.__nexusesChatJobLocks.delete(jobId);
     if (job.payloadPath) {
@@ -185,13 +230,27 @@ async function runAttioCsvImportJob(job: {
     args: (job.args || {}) as Record<string, unknown>,
     csvText,
     onStatus: async (text, done, total) => {
+      if (isChatJobCancelled(jobId)) {
+        throw new Error("Stopped by user");
+      }
       await updateJob(jobId, {
         lastSummary: text,
         progressDone: done ?? undefined,
         progressTotal: total ?? undefined,
       });
     },
+    shouldCancel: () => isChatJobCancelled(jobId),
   });
+
+  if (isChatJobCancelled(jobId)) {
+    await updateJob(jobId, {
+      status: "stopped",
+      lastSummary: "Stopped by user",
+      error: "Stopped by user",
+      finishedAt: new Date(),
+    });
+    return;
+  }
 
   const stageNote = result.mapEngagement
     ? "staged by engagement"
@@ -223,6 +282,105 @@ async function runAttioCsvImportJob(job: {
     progressDone: result.imported + result.skipped,
     progressTotal: result.importedCap || result.totalInFile,
     lastSummary: `Imported ${result.imported} contacts`,
+    result,
+    error: "",
+    finishedAt: new Date(),
+    resultMessageId: saved?._id,
+  });
+}
+
+async function runBrevoToAttioJob(job: {
+  _id: unknown;
+  userId: unknown;
+  projectId: unknown;
+  chatId: unknown;
+  args?: Record<string, unknown>;
+}) {
+  const jobId = String(job._id);
+  const args = (job.args || {}) as Record<string, unknown>;
+  const campaigns = Array.isArray(args.campaigns)
+    ? args.campaigns.map((c) => String(c || "").trim()).filter(Boolean)
+    : [];
+  const attioList = String(args.attioList || args.list || "").trim();
+  if (!campaigns.length) throw new Error("No Brevo campaigns on this job");
+  if (!attioList) throw new Error("Attio list missing on this job");
+
+  const [attio, brevo] = await Promise.all([
+    Integration.findOne({
+      userId: job.userId,
+      projectId: job.projectId,
+      provider: "attio",
+    }).lean(),
+    Integration.findOne({
+      userId: job.userId,
+      projectId: job.projectId,
+      provider: "brevo",
+    }).lean(),
+  ]);
+  if (!attio?.apiKey) throw new Error("Attio is not connected");
+  if (!brevo?.apiKey) throw new Error("Brevo is not connected");
+
+  const { importBrevoCampaignsToAttio } = await import("@/lib/brevo-attio-import");
+  const result = await importBrevoCampaignsToAttio({
+    attioApiKey: attio.apiKey,
+    brevoApiKey: brevo.apiKey,
+    brevoRestApiKey: brevo.restApiKey || undefined,
+    brevoMcpUrl: brevo.mcpUrl || undefined,
+    campaigns,
+    attioList,
+    stageProspect: String(args.stageProspect || "Prospect"),
+    stageOpen: String(args.stageOpen || "Open"),
+    stageClick: String(args.stageClick || "Click"),
+    onStatus: async (text, done, total) => {
+      if (isChatJobCancelled(jobId)) throw new Error("Stopped by user");
+      await updateJob(jobId, {
+        lastSummary: text,
+        progressDone: done ?? undefined,
+        progressTotal: total ?? undefined,
+      });
+    },
+    shouldCancel: () => isChatJobCancelled(jobId),
+  });
+
+  if (isChatJobCancelled(jobId)) {
+    await updateJob(jobId, {
+      status: "stopped",
+      lastSummary: "Stopped by user",
+      error: "Stopped by user",
+      finishedAt: new Date(),
+    });
+    return;
+  }
+
+  const stageLines = Object.entries(result.byStage || {})
+    .map(([stage, count]) => `- **${stage}:** ${Number(count).toLocaleString()}`)
+    .join("\n");
+  const content = [
+    `**Brevo → Attio finished** — **${result.imported.toLocaleString()}** unique contacts in **${result.list}**.`,
+    stageLines,
+    result.rawRecipientSum
+      ? `Raw Brevo recipient sum across campaigns: ${result.rawRecipientSum.toLocaleString()} (overlap deduped in Attio).`
+      : "",
+    result.skipped ? `${result.skipped.toLocaleString()} skipped with errors.` : "",
+    result.errors?.length ? `Sample errors: ${result.errors.slice(0, 3).join("; ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const saved = await postJobMessage({
+    userId: String(job.userId),
+    projectId: String(job.projectId),
+    chatId: String(job.chatId),
+    content,
+    toolsUsed: ["brevo_import_campaigns_to_attio"],
+    jobId,
+  });
+
+  await updateJob(jobId, {
+    status: "completed",
+    progressDone: result.imported + result.skipped,
+    progressTotal: result.uniquePeople,
+    lastSummary: `Imported ${result.imported} contacts from Brevo`,
     result,
     error: "",
     finishedAt: new Date(),
@@ -275,6 +433,46 @@ export function ensureChatJobRunner() {
     void processDueChatJobs().catch(() => undefined);
   }, 10_000);
   void processDueChatJobs().catch(() => undefined);
+}
+
+function cancelledJobIds() {
+  const g = globalThis as unknown as { __nexusesCancelledChatJobs?: Set<string> };
+  if (!g.__nexusesCancelledChatJobs) g.__nexusesCancelledChatJobs = new Set();
+  return g.__nexusesCancelledChatJobs;
+}
+
+export function isChatJobCancelled(jobId: string) {
+  return cancelledJobIds().has(jobId);
+}
+
+export async function stopProjectChatJobs(input: {
+  userId: string;
+  projectId: string;
+  chatId?: string;
+}) {
+  await dbConnect();
+  const filter: Record<string, unknown> = {
+    userId: input.userId,
+    projectId: input.projectId,
+    status: { $in: ["queued", "running"] },
+  };
+  if (input.chatId) filter.chatId = input.chatId;
+
+  const jobs = await ChatJob.find(filter).select("_id").lean();
+  for (const job of jobs) {
+    cancelledJobIds().add(String(job._id));
+  }
+
+  await ChatJob.updateMany(filter, {
+    $set: {
+      status: "stopped",
+      lastSummary: "Stopped by user",
+      error: "Stopped by user",
+      finishedAt: new Date(),
+    },
+  });
+
+  return { stopped: jobs.length };
 }
 
 export async function listProjectChatJobs(input: {

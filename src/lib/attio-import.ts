@@ -224,6 +224,7 @@ export async function runAttioCsvImportFromText(input: {
   args: Record<string, unknown>;
   csvText: string;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
+  shouldCancel?: () => boolean;
 }): Promise<AttioImportResult> {
   const listName = String(input.args.list || input.args.list_name || input.args.listName || "").trim();
   if (!listName) throw new Error("List name is required");
@@ -314,6 +315,9 @@ export async function runAttioCsvImportFromText(input: {
   );
 
   await mapPool(rows, 8, async (row) => {
+    if (input.shouldCancel?.()) {
+      throw new Error("Stopped by user");
+    }
     const email = cell(row, [
       "email",
       "email address",
@@ -360,9 +364,9 @@ export async function runAttioCsvImportFromText(input: {
           parent_object: "people",
           entry_values: rowStage ? { [stageSlug]: [{ status: rowStage }] } : {},
         },
-        { parent_record_id: recordId, parent_object: "people", entry_values: {} },
       ];
       let listed = false;
+      let lastError = "";
       for (const data of payloads) {
         try {
           await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
@@ -372,15 +376,26 @@ export async function runAttioCsvImportFromText(input: {
           });
           listed = true;
           break;
-        } catch {
-          // try next payload shape
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : "failed";
         }
       }
       if (!listed) {
+        if (rowStage) {
+          throw new Error(
+            `Could not set stage "${rowStage}" for ${email}: ${lastError || "Attio rejected stage write"}`,
+          );
+        }
         await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
           method: "POST",
           headers: attioHeaders(input.apiKey),
-          body: JSON.stringify({ data: payloads[0] }),
+          body: JSON.stringify({
+            data: {
+              parent_record_id: recordId,
+              parent_object: "people",
+              entry_values: {},
+            },
+          }),
         });
       }
       added.push(full || email);

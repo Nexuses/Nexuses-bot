@@ -1445,7 +1445,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "brevo_people_by_event",
           description:
-            "List individual emails who opened or clicked a Brevo campaign (or other recipient types). Use when the user asks who opened / clicked / drill-down people for a campaign. Prefer this over guessing MCP tools.",
+            "SAMPLE only: list a few emails who opened/clicked a Brevo campaign. Returns uniquePeople count + a small sample — NEVER claim you imported everyone from this. To put ALL recipients into Attio with stages, call brevo_import_campaigns_to_attio once.",
           parameters: {
             type: "object",
             properties: {
@@ -1456,6 +1456,33 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               },
             },
             required: ["campaign"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "brevo_import_campaigns_to_attio",
+          description:
+            "REQUIRED for Brevo→Attio bulk sync. Pulls FULL recipient lists from Brevo API (all + opens + clicks) for one or more campaigns, dedupes by email, and upserts into an Attio list with stages (default Prospect / Open / Click; Click > Open > Prospect). Runs in the background until finished. Do NOT loop attio_api or invent counts from brevo_people_by_event.",
+          parameters: {
+            type: "object",
+            properties: {
+              campaigns: {
+                type: "array",
+                items: { type: "string" },
+                description: "Exact Brevo campaign names (or ids)",
+              },
+              attio_list: {
+                type: "string",
+                description: 'Attio list name, e.g. "HR campaign (Brevo)"',
+              },
+              stage_prospect: { type: "string", description: "Default Prospect" },
+              stage_open: { type: "string", description: "Default Open" },
+              stage_click: { type: "string", description: "Default Click" },
+            },
+            required: ["campaigns", "attio_list"],
             additionalProperties: false,
           },
         },
@@ -2733,6 +2760,47 @@ export async function runTool(
       onStatus: context.onStatus,
     });
     return clip(result);
+  }
+
+  if (name === "brevo_import_campaigns_to_attio") {
+    findByProvider(integrations, "attio");
+    findByProvider(integrations, "brevo");
+    const campaigns = asStringArray(args.campaigns ?? args.campaign);
+    if (!campaigns.length) {
+      const single = String(args.campaign || args.campaignName || "").trim();
+      if (single) campaigns.push(single);
+    }
+    if (!campaigns.length) throw new Error("campaigns array is required");
+    const attioList = String(args.attio_list || args.attioList || args.list || "").trim();
+    if (!attioList) throw new Error("attio_list is required");
+
+    if (!context.userId || !context.projectId || !context.chatId) {
+      throw new Error("Cannot start Brevo→Attio import in this context");
+    }
+
+    const { enqueueBrevoToAttioImport } = await import("@/lib/chat-jobs");
+    context.onStatus?.(
+      `Starting Brevo→Attio import for ${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"} — keeps running until finished…`,
+    );
+    const job = await enqueueBrevoToAttioImport({
+      userId: context.userId,
+      projectId: context.projectId,
+      chatId: context.chatId,
+      campaigns,
+      attioList,
+      stageProspect: String(args.stage_prospect || args.stageProspect || "Prospect"),
+      stageOpen: String(args.stage_open || args.stageOpen || "Open"),
+      stageClick: String(args.stage_click || args.stageClick || "Click"),
+    });
+    return clip({
+      ok: true,
+      background: true,
+      jobId: job._id,
+      list: attioList,
+      campaigns,
+      note:
+        "Import is running in the background via Brevo API → Attio. Tell the user it will keep working until finished and a result message will appear in this chat with final counts per stage. Do NOT invent contact counts.",
+    });
   }
 
   if (name === "brevo_api") {

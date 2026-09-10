@@ -209,21 +209,27 @@ async function resolveCampaignId(
   }
 
   if (restKey) {
-    const data = (await requestJson(
-      `${BREVO}/v3/emailCampaigns?limit=50&excludeHtmlContent=true`,
-      { headers: brevoHeaders(restKey) },
-    )) as { campaigns?: Array<Record<string, unknown>> };
-    const campaigns = data?.campaigns || [];
-    const match =
-      campaigns.find((c) => String(c.name || "").toLowerCase() === q) ||
-      campaigns.find((c) => String(c.name || "").toLowerCase().includes(q));
-    if (match?.id != null) {
-      return { id: String(match.id), name: String(match.name || campaignQuery) };
+    let offset = 0;
+    const limit = 50;
+    for (let page = 0; page < 20; page += 1) {
+      const data = (await requestJson(
+        `${BREVO}/v3/emailCampaigns?limit=${limit}&offset=${offset}&excludeHtmlContent=true`,
+        { headers: brevoHeaders(restKey) },
+      )) as { campaigns?: Array<Record<string, unknown>>; count?: number };
+      const campaigns = data?.campaigns || [];
+      const exact = campaigns.find((c) => String(c.name || "").toLowerCase() === q);
+      const partial = campaigns.find((c) => String(c.name || "").toLowerCase().includes(q));
+      const match = exact || partial;
+      if (match?.id != null) {
+        return { id: String(match.id), name: String(match.name || campaignQuery) };
+      }
+      if (campaigns.length < limit) break;
+      offset += limit;
     }
   }
 
   if (mcpKey) {
-    const listed = await listBrevoCampaignsViaMcp(mcpKey, { limit: 50 });
+    const listed = await listBrevoCampaignsViaMcp(mcpKey, { limit: 100 });
     const match =
       listed.campaigns.find((c) => String(c.name || "").toLowerCase() === q) ||
       listed.campaigns.find((c) => String(c.name || "").toLowerCase().includes(q));
@@ -414,9 +420,73 @@ export async function brevoPeopleByEvent(input: {
     campaignId: campaign.id,
     event: label,
     uniquePeople: people.length,
-    people: people.slice(0, 300),
-    truncated: people.length > 300,
-    note: "Per-person list from Brevo recipient export (HTML not included).",
+    people: people.slice(0, 25),
+    sampleSize: Math.min(25, people.length),
+    truncated: people.length > 25,
+    note:
+      people.length > 25
+        ? `Showing a 25-person SAMPLE only (${people.length} total). Do NOT claim you imported everyone from this tool. To put ALL recipients into Attio with stages, call brevo_import_campaigns_to_attio once.`
+        : "Per-person list from Brevo recipient export (HTML not included).",
+  };
+}
+
+/**
+ * Full recipient export for server-side imports (no sample cap).
+ */
+export async function exportBrevoCampaignRecipientsFull(input: {
+  apiKey: string;
+  restApiKey?: string;
+  mcpUrl?: string;
+  campaign: string;
+  event?: string;
+  onStatus?: (text: string) => void;
+}) {
+  const { label, recipientsType } = brevoRecipientsType(input.event || "all");
+  const restKey = (input.restApiKey || (!input.mcpUrl ? input.apiKey : "")).trim() || undefined;
+  const mcpKey = input.mcpUrl ? input.apiKey : undefined;
+
+  input.onStatus?.(`Looking up "${input.campaign}" in Brevo…`);
+  const campaign = await resolveCampaignId(restKey, mcpKey, input.campaign);
+  input.onStatus?.(`Exporting ${label} for ${campaign.name}…`);
+
+  let people: Array<{ email: string; name: string }> = [];
+  let lastError = "";
+
+  if (restKey) {
+    try {
+      people = await exportViaRest(restKey, campaign.id, recipientsType, input.onStatus);
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : "REST export failed";
+    }
+  }
+
+  if (!people.length && mcpKey) {
+    try {
+      people = await exportViaMcp(mcpKey, campaign.id, recipientsType, input.onStatus);
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : "MCP export failed";
+    }
+  }
+
+  if (!people.length && !restKey) {
+    throw new Error(
+      "Brevo MCP alone cannot reliably export full recipient lists. Connect a standard Brevo API key (REST) and retry.",
+    );
+  }
+
+  if (!people.length) {
+    // Empty list is valid (e.g. zero clickers) — only throw when both exports hard-failed
+    if (lastError && /timed out|failed|401|403/i.test(lastError)) {
+      throw new Error(lastError);
+    }
+    return { campaignName: campaign.name, campaignId: campaign.id, event: label, people: [] };
+  }
+
+  return {
+    campaignName: campaign.name,
+    campaignId: campaign.id,
+    event: label,
+    people,
   };
 }
 

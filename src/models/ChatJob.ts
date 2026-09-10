@@ -7,12 +7,12 @@ const ChatJobSchema = new Schema(
     chatId: { type: Schema.Types.ObjectId, ref: "Chat", required: true, index: true },
     type: {
       type: String,
-      enum: ["attio_csv_import"],
+      enum: ["attio_csv_import", "brevo_to_attio"],
       default: "attio_csv_import",
     },
     status: {
       type: String,
-      enum: ["queued", "running", "completed", "failed"],
+      enum: ["queued", "running", "completed", "failed", "stopped"],
       default: "queued",
       index: true,
     },
