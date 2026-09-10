@@ -18,7 +18,7 @@ function looksLikeWork(text: string) {
 }
 
 function looksLikeClarificationReply(text: string) {
-  return /^(yes|yeah|yep|ok|okay|sure|go ahead|do it|proceed|continue|no,?\s|use |brevo|lemlist|attio|notion|last week|this week)/i.test(
+  return /^(yes|yeah|yep|ok|okay|sure|go ahead|do it|proceed|continue|no,?\s|use |brevo|lemlist|attio|notion|last week|this week|hr |hot|cold|engage|prospect)/i.test(
     text.trim(),
   );
 }
@@ -26,15 +26,21 @@ function looksLikeClarificationReply(text: string) {
 export function needsPromptStructuring(input: {
   text: string;
   fileCount: number;
+  historyCount?: number;
   lastAssistantText?: string;
 }) {
   const text = input.text.trim();
   if (!text && input.fileCount === 0) return false;
 
+  // Follow-ups in an existing thread: skip the clarifier — main agent has history.
+  if ((input.historyCount || 0) >= 2 && text.length < 220 && input.fileCount === 0) {
+    return false;
+  }
+
   // User is answering our clarifying questions — don't ask again; execute.
   if (
     input.lastAssistantText &&
-    /clarif|quick question|before i (can )?(start|continue|build|pull)|need (a bit )?more|which (one|tool|app|campaign)/i.test(
+    /clarif|quick question|before i (can )?(start|continue|build|pull)|i want to make sure|need (a bit )?more|which (one|tool|app|campaign|list|object)/i.test(
       input.lastAssistantText,
     ) &&
     (looksLikeClarificationReply(text) || text.length > 0)
@@ -87,42 +93,74 @@ function buildBrief(parts: {
   return lines.join("\n");
 }
 
+function fallbackReady(original: string): StructuredPrompt {
+  return {
+    ready: true,
+    goal: original.slice(0, 200),
+    apps: [],
+    data: "",
+    output: "",
+    constraints: "",
+    questions: [],
+    brief: buildBrief({
+      goal: original.slice(0, 200),
+      apps: [],
+      data: "",
+      output: "",
+      constraints: "",
+      original,
+    }),
+  };
+}
+
 /**
- * Rewrite messy user asks into a clear brief. If critical info is missing,
- * return ready=false with up to 2 clarifying questions.
+ * Rewrite messy user asks into a clear brief for the main agent.
+ * Prefer ready=true whenever chat history or defaults can fill gaps.
+ * Clarifying questions are rare and never block an active thread.
  */
 export async function structureUserPrompt(input: {
   text: string;
   connected: string[];
   fileNames?: string[];
   projectName?: string;
+  recentHistory?: { role: string; content: string }[];
 }): Promise<StructuredPrompt> {
   const original = input.text.trim() || "(files attached; infer task from files + history)";
-  const system = `You clarify user requests for Nexuses, an action agent that uses tools (Attio, Brevo, Lemlist, Notion, custom APIs, HTML dashboards).
+  const history = (input.recentHistory || [])
+    .slice(-8)
+    .map((m) => `${m.role}: ${String(m.content || "").slice(0, 500)}`)
+    .join("\n");
+  const hasHistory = (input.recentHistory || []).length > 0;
+
+  const system = `You rewrite user requests into a clear brief for Nexuses (Attio / Brevo / Lemlist / SmartLead / dashboards).
 
 Return ONLY compact JSON:
 {
   "ready": boolean,
   "goal": "one sentence",
-  "apps": ["brevo"],
+  "apps": ["attio"],
   "data": "what data to use or fetch",
-  "output": "what to deliver (table, dashboard link, import, etc.)",
-  "constraints": "dates, brands, real numbers only, etc.",
-  "questions": ["optional clarifying question"]
+  "output": "what to deliver",
+  "constraints": "list names, stage names, campaign names from history",
+  "questions": []
 }
 
-Rules:
-- ready=true when you can execute without guessing critical missing facts.
-- ready=false only when a blocking ambiguity remains (which app, which campaign, date range, output type). Max 2 short questions.
-- Do not ask for API keys if the needed app is already in connected.
-- Prefer ready=true for clear action asks even if some details are defaultable (e.g. last 7 days).
+Rules (strict):
+- Prefer ready=true. Use RECENT CHAT HISTORY to fill list names, stages (Hot/Engage/Cold/Prospect), campaigns, and apps. Do NOT re-ask for facts already stated in history.
+- In Attio, Hot / Engage / Cold / Prospect / Sent / Open / Click are usually LIST STAGES (status), not mystery attributes. If the user asks what is in Hot, goal = query that stage on the list from history (often "HR campaign").
+- ready=false ONLY when history is empty AND a blocking fact is missing (which app with no connection, which list when never named). Max 1 short question. Prefer [].
+- If history already names an Attio list / campaign / stage mapping, ready MUST be true and questions MUST be [].
+- Do not ask for API keys if the app is connected.
 - Never invent tool results. Never include markdown outside JSON.`;
 
   const user = `Project: ${input.projectName || "unknown"}
 Connected apps: ${input.connected.length ? input.connected.join(", ") : "none"}
 Attached files: ${(input.fileNames || []).join(", ") || "none"}
 
-User message:
+Recent chat history:
+${history || "(none — first messages)"}
+
+Latest user message:
 ${original}`;
 
   const messages: LlmMessage[] = [
@@ -133,62 +171,33 @@ ${original}`;
   try {
     const reply = await complete(messages, []);
     const parsed = extractJsonObject(String(reply.content || ""));
-    if (!parsed) {
-      return {
-        ready: true,
-        goal: original.slice(0, 200),
-        apps: [],
-        data: "",
-        output: "",
-        constraints: "",
-        questions: [],
-        brief: buildBrief({
-          goal: original.slice(0, 200),
-          apps: [],
-          data: "",
-          output: "",
-          constraints: "",
-          original,
-        }),
-      };
-    }
+    if (!parsed) return fallbackReady(original);
 
     const goal = String(parsed.goal || "").trim();
     const apps = asStringArray(parsed.apps);
     const data = String(parsed.data || "").trim();
     const output = String(parsed.output || "").trim();
     const constraints = String(parsed.constraints || "").trim();
-    const questions = asStringArray(parsed.questions).slice(0, 2);
-    const ready = parsed.ready !== false && questions.length === 0;
+    let questions = asStringArray(parsed.questions).slice(0, 1);
+
+    // Never block an active conversation for clarifying questions.
+    if (hasHistory) questions = [];
+
+    const ready = questions.length === 0 || parsed.ready !== false;
+    if (ready) questions = [];
 
     return {
-      ready,
+      ready: true,
       goal,
       apps,
       data,
       output,
       constraints,
-      questions: ready ? [] : questions,
+      questions: [],
       brief: buildBrief({ goal, apps, data, output, constraints, original }),
     };
   } catch {
-    return {
-      ready: true,
-      goal: original.slice(0, 200),
-      apps: [],
-      data: "",
-      output: "",
-      constraints: "",
-      questions: [],
-      brief: buildBrief({
-        goal: original.slice(0, 200),
-        apps: [],
-        data: "",
-        output: "",
-        constraints: "",
-        original,
-      }),
-    };
+    return fallbackReady(original);
   }
 }
 

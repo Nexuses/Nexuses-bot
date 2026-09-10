@@ -249,7 +249,7 @@ export async function POST(request: Request, { params }: Params) {
   const [history, integrationDocs] = await Promise.all([
     Message.find({ userId: session.userId, projectId: id, chatId: chat._id })
       .sort({ createdAt: -1 })
-      .limit(20)
+      .limit(40)
       .lean(),
     Integration.find({ userId: session.userId, projectId: id }).lean(),
   ]);
@@ -281,7 +281,10 @@ export async function POST(request: Request, { params }: Params) {
 You do the work. You are not a documentation bot.
 
 Rules:
-- When the user asks to create, update, delete, send, search, or fetch something, you MUST call tools and complete it in their connected APIs.
+- When the user asks to create, update, delete, send, search, fetch, list, or explain something in a connected app, you MUST call tools and complete it. Do not interview them first.
+- Use THIS CHAT'S HISTORY as source of truth for list names, campaign names, stage mappings, webhook URLs, and prior imports. Never re-ask for a fact already stated earlier in the thread.
+- Ban the phrase pattern "I want to make sure I do this right" / "Quick questions before I start" unless the thread has ZERO usable context and a single blocking fact is missing. Prefer acting with tools.
+- In Attio, names like Hot, Engage, Cold, Prospect, Sent, Open, Click are usually pipeline STAGES on a list (status attribute), not unknown fields. If the user asks what is in Hot / Engage / etc., query that stage on the list from history (e.g. HR campaign) via Attio tools and answer with people/counts — do not ask what Hot means.
 - Never answer with only steps, sample JSON, or "you can do this in Attio/Brevo/Lemlist". Execute it.
 - If a tool errors, fix the payload and retry. Only stop after a real API success or a hard permission error.
 - After tools succeed, tell the user what changed in plain language: names, counts, status, dates — briefly. Do not mention IDs. Do not narrate every tool call.
@@ -309,10 +312,11 @@ Reply style (required — users skim; long essays are a failure):
 - Never narrate internal reasoning in the user-visible reply. Ban phrases like: "Let me reconsider", "Actually,", "Given the constraints", "Let me be honest", "The realistic path", "I need to", "Let me try", "Wait —", or multi-paragraph rethink loops. Think privately; write the conclusion only.
 - Do not restate the whole problem history. Do not list every endpoint you tried. Status updates belong in the live status line, not in the final message.
 - Put large data in the dashboard / share link — not pasted into chat. In chat: short summary + [Open report](url).
-- When blocked, use this compact shape (and stop):
+- When blocked, use this compact shape (and stop) — only if history + tools cannot resolve it:
   **Blocked:** one sentence why.
   **Need from you:** one concrete ask (e.g. attach CSVs / paste a key / pick a list).
   Optional: one line of what you already have.
+- Do not ask multiple clarifying questions in a row. If they already answered, execute.
 - When successful, prefer: what changed + counts + link (if any). Skip filler praise and disclaimers.
 
 Formatting (required):
@@ -327,7 +331,8 @@ Formatting (required):
 ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
-- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). For campaign CSVs with sent/opened/clicked/replied columns, omit stage so engagement maps to stages. Never import contacts one API call at a time.
+- If the user asks who / what is on an Attio list or stage (Hot, Engage, Cold, Prospect, etc.), call attio_list_entries with the list from chat history. Answer with counts + names/emails. Do not ask what the stage means.
+- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). For campaign CSVs with sent/opened/clicked/replied columns, omit stage so engagement maps to stages (or use the stages they named). Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once. Do not claim it is impossible. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.
@@ -398,10 +403,17 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
         const lastAssistantText = String(
           history.find((message) => message.role === "assistant")?.content || "",
         );
+        const recentHistory = [...history]
+          .reverse()
+          .map((message) => ({
+            role: String(message.role || ""),
+            content: String(message.content || ""),
+          }));
         if (
           needsPromptStructuring({
             text: displayText || text,
-            fileCount: files.length,
+            fileCount: extracted.length,
+            historyCount: history.length,
             lastAssistantText,
           })
         ) {
@@ -412,12 +424,21 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
             structureUserPrompt({
               text: displayText || text,
               connected,
-              fileNames: files.map((file) => file.name),
+              fileNames: extracted.map((file) => file.meta.name),
               projectName: project.name,
+              recentHistory,
             }),
           );
 
-          if (!structured.ready && structured.questions.length) {
+          // Never short-circuit the agent with interview questions in an active
+          // thread — that caused endless "Quick questions before I start" loops.
+          // Only block on first-turn asks when the structurer is truly stuck.
+          if (
+            !structured.ready &&
+            structured.questions.length &&
+            history.length === 0 &&
+            extracted.length === 0
+          ) {
             const content = formatClarifyingQuestions(structured.questions, structured.goal);
             const saved = await Message.create({
               userId: session.userId,

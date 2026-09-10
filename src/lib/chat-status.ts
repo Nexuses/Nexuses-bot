@@ -52,6 +52,7 @@ export function statusForTool(name: string) {
     list_automations: "Checking automatic updates…",
     stop_automation: "Stopping automatic updates…",
     attio_import_to_list: "Importing contacts into Attio. This can take a little time…",
+    attio_list_entries: "Loading people from the Attio list…",
     attio_create_list: "Creating the list in Attio…",
     attio_list_lists: "Looking up your Attio lists…",
     attio_list_objects: "Checking Attio objects…",

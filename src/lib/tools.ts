@@ -1490,6 +1490,27 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       {
         type: "function",
         function: {
+          name: "attio_list_entries",
+          description:
+            "List people on an Attio list (e.g. HR campaign), optionally filtered by stage/status like Hot, Engage, Cold, Prospect. Use when the user asks what is in a stage, who is on a list, or what data was put in Hot/Engage/etc. Prefer this over asking clarifying questions.",
+          parameters: {
+            type: "object",
+            properties: {
+              list: { type: "string", description: "Attio list name, e.g. HR campaign" },
+              stage: {
+                type: "string",
+                description: "Optional stage/status filter, e.g. Hot, Engage, Cold, Prospect",
+              },
+              limit: { type: "number", description: "Max entries to return, default 50, max 200" },
+            },
+            required: ["list"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
           name: "attio_query_records",
           description: "Search Attio records. Use object people or companies. Optional search text.",
           parameters: {
@@ -2478,6 +2499,144 @@ export async function runTool(
       headers: attioHeaders(attio.apiKey),
     });
     return clip(data);
+  }
+
+  if (name === "attio_list_entries") {
+    const attio = findByProvider(integrations, "attio");
+    const listName = String(args.list || args.list_name || args.listName || "").trim();
+    if (!listName) throw new Error("List name is required");
+    const stage = String(args.stage || args.status || "").trim();
+    const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 200);
+
+    context.onStatus?.(`Looking up Attio list “${listName}”…`);
+    const lists = (await requestJson(`${ATTIO}/v2/lists`, {
+      headers: attioHeaders(attio.apiKey),
+    })) as { data?: { name?: string; api_slug?: string; id?: { list_id?: string } }[] };
+    const list = (lists.data || []).find(
+      (item) =>
+        item.name?.toLowerCase() === listName.toLowerCase() ||
+        item.api_slug?.toLowerCase() === slugify(listName),
+    );
+    if (!list) {
+      const names = (lists.data || []).map((item) => item.name).filter(Boolean);
+      throw new Error(
+        `No Attio list named "${listName}". Available: ${names.join(", ") || "none"}`,
+      );
+    }
+    const listId = list.id?.list_id || list.api_slug || "";
+
+    const attributes = (await requestJson(
+      `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes`,
+      { headers: attioHeaders(attio.apiKey) },
+    )) as { data?: { api_slug?: string; title?: string; type?: string }[] };
+    const statusAttr =
+      (attributes.data || []).find(
+        (item) => item.type === "status" && /stage|status/i.test(item.api_slug || item.title || ""),
+      ) || (attributes.data || []).find((item) => item.type === "status");
+    const stageSlug = statusAttr?.api_slug || "stage";
+
+    const body: Record<string, unknown> = { limit, sorts: [{ direction: "desc", attribute: "created_at" }] };
+    if (stage && statusAttr) {
+      body.filter = {
+        path: [[`lists.${list.api_slug || listId}`, stageSlug], "status"],
+        constraints: { value: stage },
+      };
+    }
+
+    context.onStatus?.(
+      stage ? `Loading “${stage}” entries from ${list.name}…` : `Loading entries from ${list.name}…`,
+    );
+
+    let data: unknown;
+    try {
+      data = await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries/query`, {
+        method: "POST",
+        headers: attioHeaders(attio.apiKey),
+        body: JSON.stringify(body),
+      });
+    } catch {
+      // Fallback: unfiltered query, filter client-side by stage title.
+      data = await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries/query`, {
+        method: "POST",
+        headers: attioHeaders(attio.apiKey),
+        body: JSON.stringify({ limit: Math.min(limit * 3, 200) }),
+      });
+    }
+
+    const rows = Array.isArray((data as { data?: unknown[] })?.data)
+      ? ((data as { data: Record<string, unknown>[] }).data)
+      : [];
+
+    const summarizeEntry = (entry: Record<string, unknown>) => {
+      const values = (entry.entry_values || entry.values || {}) as Record<string, unknown>;
+      const stageVal = values[stageSlug];
+      let stageTitle = "";
+      if (typeof stageVal === "string") stageTitle = stageVal;
+      else if (Array.isArray(stageVal) && stageVal[0] && typeof stageVal[0] === "object") {
+        const first = stageVal[0] as Record<string, unknown>;
+        const status = first.status;
+        if (typeof status === "string") stageTitle = status;
+        else if (status && typeof status === "object") {
+          stageTitle = String((status as { title?: string }).title || "");
+        }
+        stageTitle = stageTitle || String(first.title || first.value || "");
+      }
+      const parent = (entry.parent_record_id || entry.record_id || "") as string;
+      return {
+        entry_id: pickAttioId(entry, ["entry_id"]) || "",
+        parent_record_id: parent,
+        stage: stageTitle || null,
+        raw_stage: stageVal ?? null,
+      };
+    };
+
+    let entries = rows.map(summarizeEntry);
+    if (stage) {
+      const needle = stage.toLowerCase();
+      const filtered = entries.filter((item) => (item.stage || "").toLowerCase() === needle);
+      if (filtered.length) entries = filtered;
+    }
+
+    // Resolve people names/emails for the first page.
+    const people: { name: string; email: string; stage: string | null }[] = [];
+    for (const entry of entries.slice(0, limit)) {
+      if (!entry.parent_record_id) {
+        people.push({ name: "", email: "", stage: entry.stage });
+        continue;
+      }
+      try {
+        const person = (await requestJson(
+          `${ATTIO}/v2/objects/people/records/${encodeURIComponent(entry.parent_record_id)}`,
+          { headers: attioHeaders(attio.apiKey) },
+        )) as {
+          data?: {
+            values?: {
+              name?: { full_name?: string }[];
+              email_addresses?: { email_address?: string }[];
+            };
+          };
+        };
+        const values = person.data?.values || {};
+        const fullName = values.name?.[0]?.full_name || "";
+        const email = values.email_addresses?.[0]?.email_address || "";
+        people.push({ name: fullName, email, stage: entry.stage });
+      } catch {
+        people.push({ name: "", email: "", stage: entry.stage });
+      }
+    }
+
+    return clip({
+      ok: true,
+      list: list.name,
+      stage: stage || null,
+      count: people.length,
+      totalMatched: entries.length,
+      people: people.filter((p) => p.email || p.name).slice(0, limit),
+      note:
+        stage && people.length === 0
+          ? `No people found on "${list.name}" in stage "${stage}". In this chat, CSV/webhook mapping may have used Prospect / Engage / Cold instead of Hot.`
+          : undefined,
+    });
   }
 
   if (name === "attio_query_records") {
