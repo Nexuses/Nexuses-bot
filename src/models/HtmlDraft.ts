@@ -9,7 +9,7 @@ const HtmlDraftSchema = new Schema(
     clientLogoUrl: { type: String, trim: true, default: "" },
     clientName: { type: String, trim: true, default: "" },
     buffer: { type: String, default: "" },
-    expiresAt: { type: Date, required: true, index: true },
+    expiresAt: { type: Date, required: true },
   },
   { timestamps: true },
 );

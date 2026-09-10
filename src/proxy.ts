@@ -2,6 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifyToken } from "@/lib/jwt";
 
 export async function proxy(request: NextRequest) {
+  // Bots probe react2shell with fake Next-Action values like "x" / "action".
+  // Real Server Action IDs are long hashes — reject obvious garbage early.
+  if (request.method === "POST") {
+    const action = (
+      request.headers.get("next-action") ||
+      request.headers.get("Next-Action") ||
+      ""
+    ).trim();
+    if (action && action.length < 16) {
+      return NextResponse.json({ error: "Bad request" }, { status: 400 });
+    }
+  }
+
   const { pathname } = request.nextUrl;
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifyToken(token) : null;

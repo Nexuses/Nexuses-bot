@@ -175,7 +175,7 @@ export async function upsertIntegrationDoc(
           mcpUrl: (input.mcpUrl || "").trim().replace(/\/$/, ""),
           authType: input.authType ?? "bearer",
         },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 
   return { ...serializeIntegration(doc), apiKey: doc.apiKey, restApiKey: doc.restApiKey || "" };
