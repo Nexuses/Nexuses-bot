@@ -25,7 +25,7 @@ const MAX_BYTES = 32 * 1024 * 1024;
 type ChatJobDTO = {
   _id: string;
   type: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "stopped";
   title: string;
   chatId: string;
   progressDone: number;
@@ -211,7 +211,9 @@ export function ProjectChat({
       const data = await res.json();
       if (!res.ok || !Array.isArray(data.jobs)) return;
       const jobs = data.jobs as ChatJobDTO[];
-      setChatJobs(jobs.filter((job) => job.status === "queued" || job.status === "running"));
+      const live = jobs.filter((job) => job.status === "queued" || job.status === "running");
+      setChatJobs(live);
+      for (const job of live) knownJobIds.current.add(job._id);
 
       // Also check recent finished jobs for this chat so completion messages appear.
       const histQs = activeChatId
