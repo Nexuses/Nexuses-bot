@@ -166,6 +166,8 @@ export function ProjectChat({
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const knownJobIds = useRef<Set<string>>(new Set());
+  const abortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -399,7 +401,11 @@ export function ProjectChat({
     if (event.dataTransfer.files.length) addFiles(event.dataTransfer.files);
   }
 
-  async function uploadPendingFile(file: File, onProgress: (label: string) => void) {
+  async function uploadPendingFile(
+    file: File,
+    onProgress: (label: string) => void,
+    signal?: AbortSignal,
+  ) {
     const CHUNK = 512 * 1024; // stay under common 1MB proxy limits
     if (file.size <= CHUNK) {
       const uploadForm = new FormData();
@@ -407,6 +413,7 @@ export function ProjectChat({
       const uploadRes = await fetch(`/api/projects/${project._id}/uploads`, {
         method: "POST",
         body: uploadForm,
+        signal,
       });
       const uploadData = (await uploadRes.json().catch(() => null)) as
         | { upload?: { id?: string }; error?: string }
@@ -430,6 +437,7 @@ export function ProjectChat({
     const beginRes = await fetch(`/api/projects/${project._id}/uploads`, {
       method: "POST",
       body: beginForm,
+      signal,
     });
     const beginData = (await beginRes.json().catch(() => null)) as
       | { upload?: { id?: string }; error?: string }
@@ -440,6 +448,7 @@ export function ProjectChat({
     const uploadId = beginData.upload.id;
 
     for (let i = 0; i < totalChunks; i += 1) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       onProgress(`Uploading ${file.name}… ${i + 1}/${totalChunks}`);
       const blob = file.slice(i * CHUNK, Math.min(file.size, (i + 1) * CHUNK));
       const chunkForm = new FormData();
@@ -450,6 +459,7 @@ export function ProjectChat({
       const chunkRes = await fetch(`/api/projects/${project._id}/uploads`, {
         method: "POST",
         body: chunkForm,
+        signal,
       });
       const chunkData = (await chunkRes.json().catch(() => null)) as { error?: string } | null;
       if (!chunkRes.ok) {
@@ -463,6 +473,7 @@ export function ProjectChat({
     const finishRes = await fetch(`/api/projects/${project._id}/uploads`, {
       method: "POST",
       body: finishForm,
+      signal,
     });
     const finishData = (await finishRes.json().catch(() => null)) as
       | { upload?: { id?: string }; error?: string }
@@ -471,6 +482,22 @@ export function ProjectChat({
       throw new Error(finishData?.error || `Could not finish upload (${finishRes.status})`);
     }
     return finishData.upload.id;
+  }
+
+  async function stopChat() {
+    stopRequestedRef.current = true;
+    abortRef.current?.abort();
+    setStatus("Stopping…");
+    try {
+      await fetch(`/api/projects/${project._id}/chat-jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", chatId: activeChatId || undefined }),
+      });
+    } catch {
+      // ignore — client abort still stops the stream wait
+    }
+    void refreshChatJobs();
   }
 
   async function send(event?: FormEvent) {
@@ -497,17 +524,24 @@ export function ProjectChat({
     setFiles([]);
     setBusy(true);
     setStatus(pending.length ? "Uploading your file…" : "Working on it…");
+    stopRequestedRef.current = false;
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const uploadIds: string[] = [];
       for (const [index, item] of pending.entries()) {
-        const id = await uploadPendingFile(item.file, (label) => {
-          setStatus(
-            pending.length === 1
-              ? label
-              : `File ${index + 1}/${pending.length}: ${label}`,
-          );
-        });
+        const id = await uploadPendingFile(
+          item.file,
+          (label) => {
+            setStatus(
+              pending.length === 1
+                ? label
+                : `File ${index + 1}/${pending.length}: ${label}`,
+            );
+          },
+          controller.signal,
+        );
         uploadIds.push(id);
       }
 
@@ -520,6 +554,7 @@ export function ProjectChat({
       const res = await fetch(`/api/projects/${project._id}/chat`, {
         method: "POST",
         body: form,
+        signal: controller.signal,
       });
       const contentType = res.headers.get("content-type") || "";
       if (!res.ok && !contentType.includes("text/event-stream")) {
@@ -533,7 +568,6 @@ export function ProjectChat({
       let doneUserMessage: ChatMessageDTO | undefined;
       let doneChat: ChatThreadDTO | undefined;
       let streamError = "";
-      let trackedChatId = activeChatId;
 
       await readChatEvents(res, (event) => {
         if (event.type === "status" && event.text) setStatus(event.text);
@@ -544,7 +578,6 @@ export function ProjectChat({
           doneMessage = event.message;
           doneUserMessage = event.userMessage;
           doneChat = event.chat;
-          if (event.chat?._id) trackedChatId = event.chat._id;
           if (event.integrations) setIntegrations(event.integrations);
         }
         if (event.type === "error") streamError = event.error || "Chat failed";
@@ -576,6 +609,19 @@ export function ProjectChat({
       }
       void refreshChatJobs();
     } catch (err) {
+      const aborted =
+        stopRequestedRef.current ||
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error && /abort/i.test(err.message));
+
+      if (aborted) {
+        setError("Stopped.");
+        setInput(text);
+        setFiles(pending);
+        setMessages((current) => current.filter((item) => item._id !== optimistic._id));
+        return;
+      }
+
       const message = err instanceof Error ? err.message : "Chat failed";
       const looksNetwork =
         /network|fetch|failed to fetch|connection|closed before finishing|load failed/i.test(
@@ -604,6 +650,8 @@ export function ProjectChat({
       setFiles(pending);
       setMessages((current) => current.filter((item) => item._id !== optimistic._id));
     } finally {
+      abortRef.current = null;
+      stopRequestedRef.current = false;
       setBusy(false);
       setStatus("");
     }
@@ -971,13 +1019,25 @@ export function ProjectChat({
                   Add Attio, Brevo, Lemlist, or Other
                 </button>
               </div>
-              <button
-                type="submit"
-                disabled={busy || (!input.trim() && !files.length)}
-                className="rounded-full bg-sea px-5 py-2 text-sm font-semibold text-on-sea disabled:opacity-40"
-              >
-                Send
-              </button>
+              <div className="flex items-center gap-2">
+                {busy ? (
+                  <button
+                    type="button"
+                    onClick={() => void stopChat()}
+                    className="rounded-full border border-line px-5 py-2 text-sm font-semibold text-paper hover:border-sea hover:text-sea"
+                  >
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!input.trim() && !files.length}
+                    className="rounded-full bg-sea px-5 py-2 text-sm font-semibold text-on-sea disabled:opacity-40"
+                  >
+                    Send
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </form>
