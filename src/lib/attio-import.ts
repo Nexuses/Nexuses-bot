@@ -298,28 +298,35 @@ function hasEngagementValue(value: string) {
 function rowMatchesCsvFilter(row: Record<string, string>, filter: string) {
   const f = filter.toLowerCase();
   if (!f || f === "all") return true;
+  const status = cell(row, ["status", "engagement", "event", "activity", "lead status"]).toLowerCase();
   if (f === "opened" || f === "open") {
     return (
-      hasEngagementValue(cell(row, ["opened time", "opened_time", "open time", "opened"])) ||
-      Number(cell(row, ["open count", "open_count", "opens"]) || 0) > 0
+      hasEngagementValue(cell(row, ["opened time", "opened_time", "open time", "opened", "open date"])) ||
+      Number(cell(row, ["open count", "open_count", "opens"]) || 0) > 0 ||
+      (/open/.test(status) && !/click/.test(status))
     );
   }
   if (f === "clicked" || f === "click") {
     return (
-      hasEngagementValue(cell(row, ["clicked time", "clicked_time", "click time", "clicked"])) ||
-      Number(cell(row, ["click count", "click_count", "clicks"]) || 0) > 0
+      hasEngagementValue(cell(row, ["clicked time", "clicked_time", "click time", "clicked", "cta clicked"])) ||
+      Number(cell(row, ["click count", "click_count", "clicks"]) || 0) > 0 ||
+      /click/.test(status)
     );
   }
   if (f === "replied" || f === "reply") {
     return (
       hasEngagementValue(cell(row, ["replied time", "replied_time", "reply time", "replied"])) ||
-      hasEngagementValue(cell(row, ["reply message", "reply_message", "reply"]))
+      hasEngagementValue(cell(row, ["reply message", "reply_message", "reply"])) ||
+      /repl/.test(status)
     );
   }
   if (f === "sent") {
     return (
-      hasEngagementValue(cell(row, ["sent time", "sent_time", "sent"])) ||
-      hasEngagementValue(cell(row, ["sent email", "sent_email"]))
+      hasEngagementValue(cell(row, ["sent time", "sent_time", "sent", "send date", "send time", "delivered"])) ||
+      hasEngagementValue(cell(row, ["sent email", "sent_email"])) ||
+      /sent|deliver|prospect/i.test(status) ||
+      // Rows in a delivered export with an email count as sent/prospect candidates.
+      Boolean(emailFromRecord(row))
     );
   }
   return true;
@@ -354,7 +361,9 @@ function csvLooksLikeEngagement(rows: Record<string, string>[]) {
   const sample = rows[0] || {};
   const keys = Object.keys(sample).join(" ");
   if (sample._section) return true;
-  return /opened|clicked|replied|sent time|open count|click count|_section/i.test(keys);
+  return /opened|clicked|replied|sent time|send date|open count|click count|opens|clicks|status|_section|delivered|cta clicked/i.test(
+    keys,
+  );
 }
 
 async function mapPool<T>(
@@ -391,7 +400,7 @@ export type AttioImportResult = {
   errors: string[];
 };
 
-/** Infer Sent/Open/Click section from common export filenames. */
+/** Infer Sent/Open/Click section from common export filenames (same campaign). */
 export function engagementSectionFromFileName(name: string) {
   const n = name.toLowerCase();
   if (/click/.test(n)) return "clicked" as const;
@@ -401,8 +410,9 @@ export function engagementSectionFromFileName(name: string) {
 }
 
 /**
- * Merge delivered/opened/clicked (or Excel) attachments into one engagement CSV
- * so Click > Open > Prospect dedupe works in a single import.
+ * Merge one campaign's delivered / opened / clicked exports (or Excel) into one CSV.
+ * Also works with a single all-in-one engagement file (no merge needed).
+ * Dedupes later as Click > Open > Prospect.
  */
 export function mergeSpreadsheetAttachments(
   files: { name: string; text: string }[],
@@ -416,6 +426,11 @@ export function mergeSpreadsheetAttachments(
         !file.text.startsWith("Large Excel")),
   );
   if (!sheets.length) return inlineCsv.trim();
+
+  // Single all-in-one file — use as-is (sections/columns handled by parseCsv).
+  if (sheets.length === 1 && !inlineCsv.trim()) {
+    return sheets[0].text.trim();
+  }
 
   const ranked = [...sheets].sort((a, b) => {
     const rank = (name: string) => {

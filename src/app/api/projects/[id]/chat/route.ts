@@ -61,7 +61,9 @@ function providerGuide(integrations: StoredIntegration[]) {
   if (integrations.some((item) => item.provider === "attio")) {
     parts.push(`Attio is connected. Execute Attio work with tools.
 - Create a list/pipeline with stages: call attio_create_list with name and stages. Do this for requests like "create a list named X with stages A, B, C".
-- Import a CSV or Excel spreadsheet into a list/stage: call attio_import_to_list ONCE with the list name and stage. Do not loop attio_api for each row.
+- Import a CSV or Excel spreadsheet into a list/stage: call attio_import_to_list ONCE with the list name. Do not loop attio_api for each row.
+- One campaign may arrive as THREE files (delivered + opened + clicked) — that is still ONE campaign. Call attio_import_to_list ONCE; the server merges them (Clicks > Open > Prospect). Do not say “3 campaigns.”
+- One campaign may also arrive as a SINGLE file with all engagement details (sections or open/click columns) — call attio_import_to_list ONCE the same way.
 - Inspect lists: attio_list_lists.
 - Search people/companies: attio_query_records.
 - Anything else: attio_api with method + path starting /v2/. Write bodies use {"data":{...}}.
@@ -335,7 +337,7 @@ ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user asks who / what is on an Attio list or stage (Hot, Engage, Cold, Prospect, etc.), call attio_list_entries with the list from chat history. Answer with counts + names/emails. Do not ask what the stage means.
-- If the user uploads a CSV or Excel file for Attio, call attio_import_to_list once (full file is available). When they attach delivered + opened + clicked files together, still call attio_import_to_list ONCE with the target list — the server merges them (Clicks > Open > Prospect). Large imports run in the background with Attio rate-limit retries until finished. Never import contacts one API call at a time. Never invent per-stage counts — wait for the background result.
+- If the user uploads CSV/Excel for Attio, call attio_import_to_list once (full file(s) available). If they attach delivered + opened + clicked for the same campaign id/name, that is ONE campaign — still one tool call. If they attach one combined engagement report, also one tool call. Stages: Clicks > Open > Prospect. Background + rate-limit retries. Never invent per-stage counts — wait for the background result.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once for a sample/count only — never claim that sample filled Attio. To import all recipients from one or more Brevo campaigns into an Attio list with stages, call brevo_import_campaigns_to_attio once and wait for the background result. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.

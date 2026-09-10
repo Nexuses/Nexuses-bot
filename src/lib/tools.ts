@@ -821,8 +821,12 @@ async function attioImportToList(
     "";
   if (!csvText) throw new Error("No spreadsheet data found. Attach a CSV or Excel (.xlsx/.xls) file.");
 
-  const multiEngagement =
-    sheetFiles.filter((file) => engagementSectionFromFileName(file.name)).length >= 2;
+  const engagementFileCount = sheetFiles.filter((file) =>
+    engagementSectionFromFileName(file.name),
+  ).length;
+  // Same campaign can arrive as 3 exports (delivered/opened/clicked) OR 1 combined file.
+  const multiEngagementExports = engagementFileCount >= 2;
+
   const importArgs: Record<string, unknown> = {
     ...args,
     list: listName,
@@ -831,17 +835,36 @@ async function attioImportToList(
     stage_open: args.stage_open || args.stageOpen || "Open",
     stage_click: args.stage_click || args.stageClick || "Clicks",
   };
-  if (multiEngagement) {
-    // Don't pin everyone to one stage when delivered/opened/clicked files are attached together.
+
+  // Peek rows so a single all-in-one engagement file also maps stages.
+  const previewRows = parseCsv(csvText);
+  const singleFileHasEngagement =
+    previewRows.some((row) => Boolean(row._section)) ||
+    (() => {
+      const sample = previewRows[0] || {};
+      const keys = Object.keys(sample).join(" ");
+      return /opened|clicked|replied|sent time|send date|open count|click count|opens|clicks|status|cta clicked/i.test(
+        keys,
+      );
+    })();
+
+  if (multiEngagementExports || singleFileHasEngagement) {
     delete importArgs.stage;
     delete importArgs.status;
     importArgs.map_engagement = true;
   }
 
-  const allRows = parseCsv(csvText);
+  const allRows = previewRows;
   const maxRows = Math.min(Math.max(Number(args.limit) || 2000, 1), 5000);
   const rowCount = Math.min(allRows.length, maxRows);
   if (!allRows.length) throw new Error("CSV has no data rows. Include a header row and at least one contact.");
+
+  const sourceNote =
+    sheetFiles.length > 1
+      ? `one campaign · ${sheetFiles.length} engagement files`
+      : sheetFiles[0]
+        ? `file “${sheetFiles[0].name}”`
+        : "uploaded data";
 
   // Long imports keep running in the background so a dropped chat connection cannot kill them.
   if (
@@ -852,7 +875,7 @@ async function attioImportToList(
   ) {
     const { enqueueAttioCsvImport } = await import("@/lib/chat-jobs");
     onStatus?.(
-      `Starting background import of ${rowCount.toLocaleString()} contacts into “${listName}” — throttled for Attio, keeps running until finished…`,
+      `Starting background import of ${rowCount.toLocaleString()} contacts into “${listName}” (${sourceNote}) — throttled for Attio…`,
     );
     const job = await enqueueAttioCsvImport({
       userId: context.userId,
@@ -872,8 +895,9 @@ async function attioImportToList(
       total: rowCount,
       totalInFile: allRows.length,
       files: sheetFiles.map((f) => f.name),
+      sameCampaign: true,
       note:
-        "Import is running in the background into the named Attio list until finished. Tell the user the list name and that stages are Click > Open > Prospect when multiple engagement files were attached. A result message with per-stage counts will appear when done. Do not invent counts.",
+        "These files are ONE campaign’s engagement exports (or one combined report), not multiple campaigns. Import runs in the background into the named Attio list. Stages: Clicks > Open > Prospect. Tell the user that clearly. A result with per-stage counts posts when done — do not invent counts.",
     });
   }
 
@@ -1351,7 +1375,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from attached CSV/Excel into an Attio list. When delivered+opened+clicked files are attached together, merge them once (Click > Open > Prospect). Larger imports run in the BACKGROUND with Attio rate-limit retries until finished. Use ONCE. Defaults: Prospect / Open / Clicks. Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
+            "Import people from attached CSV/Excel into an Attio list. Supports (1) ONE campaign as 3 files: delivered + opened + clicked — merge once; (2) ONE combined engagement file with Sent/Open/Click sections or columns. Stages default Prospect / Open / Clicks (Click > Open > Prospect). Never call this 3 times for 3 files of the same campaign. Background + Attio 429 retries. Do not invent counts.",
           parameters: {
             type: "object",
             properties: {
@@ -1364,7 +1388,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               map_engagement: {
                 type: "boolean",
                 description:
-                  "Map CSV engagement to stages (replied→hot, clicked→click, opened→open, sent→sent). Auto-on for campaign CSVs when stage is omitted.",
+                  "Map engagement to stages (clicked→Clicks, opened→Open, delivered/sent→Prospect). Auto-on for campaign exports and single all-in-one engagement files.",
               },
               csv: {
                 type: "string",
