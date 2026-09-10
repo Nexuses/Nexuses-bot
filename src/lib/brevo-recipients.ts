@@ -50,6 +50,57 @@ export function brevoRecipientsType(event: string) {
   return { label: "opens", recipientsType: "openers" as const };
 }
 
+function isValidEmail(value: string) {
+  const email = value.trim().toLowerCase();
+  // Reject whole CSV rows / names / urls mistaken for emails
+  if (!email || email.length > 254 || email.includes(";") || email.includes(",")) return false;
+  if (email.includes(" ")) return false;
+  return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email);
+}
+
+function detectCsvDelimiter(headerLine: string) {
+  let commas = 0;
+  let semis = 0;
+  let inQuotes = false;
+  for (let i = 0; i < headerLine.length; i += 1) {
+    const ch = headerLine[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    if (ch === ",") commas += 1;
+    if (ch === ";") semis += 1;
+  }
+  return semis > commas ? ";" : ",";
+}
+
+function splitCsvLine(line: string, delimiter: string) {
+  const cells: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (ch === delimiter && !inQuotes) {
+      cells.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells.map((cell) => cell.replace(/^"|"$/g, "").trim());
+}
+
 function parseEmailsFromCsv(csv: string) {
   const lines = csv
     .replace(/^\uFEFF/, "")
@@ -58,58 +109,50 @@ function parseEmailsFromCsv(csv: string) {
     .filter(Boolean);
   if (!lines.length) return [] as Array<{ email: string; name: string }>;
 
-  const split = (line: string) => {
-    const cells: string[] = [];
-    let cur = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i += 1) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          cur += '"';
-          i += 1;
-        } else {
-          inQuotes = !inQuotes;
-        }
-        continue;
-      }
-      if (ch === "," && !inQuotes) {
-        cells.push(cur.trim());
-        cur = "";
-        continue;
-      }
-      cur += ch;
-    }
-    cells.push(cur.trim());
-    return cells;
-  };
-
-  const header = split(lines[0]).map((h) => h.toLowerCase());
-  const emailIdx = header.findIndex((h) => h === "email" || h.includes("email"));
-  const firstIdx = header.findIndex((h) => h.includes("first"));
-  const lastIdx = header.findIndex((h) => h.includes("last"));
-  const nameIdx = header.findIndex((h) => h === "name" || h.includes("fullname"));
+  const delimiter = detectCsvDelimiter(lines[0]);
+  const header = splitCsvLine(lines[0], delimiter).map((h) => h.toLowerCase());
+  const looksLikeHeader = header.some((h) => /email|campaign|recipient|open|click/i.test(h));
+  const emailIdx = header.findIndex(
+    (h) => h === "email" || h === "email address" || h === "email_address" || h === "mail",
+  );
+  const firstIdx = header.findIndex((h) => /first/.test(h));
+  const lastIdx = header.findIndex((h) => /last/.test(h));
+  const nameIdx = header.findIndex((h) => h === "name" || h === "fullname" || h === "full name");
 
   const people = new Map<string, { email: string; name: string }>();
-  const start = emailIdx >= 0 ? 1 : 0;
+  const start = looksLikeHeader ? 1 : 0;
+
   for (const line of lines.slice(start)) {
-    const cells = split(line);
+    const cells = splitCsvLine(line, delimiter);
     let email = "";
     if (emailIdx >= 0) email = cells[emailIdx] || "";
-    else {
-      const found = cells.find((c) => /@/.test(c));
+    if (!isValidEmail(email)) {
+      const found = cells.find((c) => isValidEmail(c));
       email = found || "";
     }
+    if (!isValidEmail(email)) {
+      // Last resort: pull first email-shaped token from the raw line
+      const match = line.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+      email = match?.[0] || "";
+    }
     email = email.replace(/^"|"$/g, "").trim().toLowerCase();
-    if (!email.includes("@")) continue;
+    if (!isValidEmail(email)) continue;
+
     const name =
       nameIdx >= 0
         ? cells[nameIdx] || ""
         : [firstIdx >= 0 ? cells[firstIdx] : "", lastIdx >= 0 ? cells[lastIdx] : ""]
             .filter(Boolean)
             .join(" ");
-    people.set(email, { email, name: name.replace(/^"|"$/g, "").trim() });
+    people.set(email, { email, name: String(name || "").replace(/^"|"$/g, "").trim() });
   }
+
+  if (lines.length > 5 && people.size === 0) {
+    throw new Error(
+      `Brevo export CSV had ${lines.length} rows but no valid emails were parsed (delimiter "${delimiter}").`,
+    );
+  }
+
   return [...people.values()].sort((a, b) => a.email.localeCompare(b.email));
 }
 

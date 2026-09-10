@@ -118,6 +118,10 @@ async function upsertPersonWithStage(
   person: { email: string; name?: string },
   stage: string,
 ) {
+  const email = String(person.email || "").trim().toLowerCase();
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email) || email.includes(";") || email.includes(" ")) {
+    throw new Error(`Invalid email address: ${email.slice(0, 80)}`);
+  }
   const [first = "", ...rest] = (person.name || "").split(/\s+/);
   const last = rest.join(" ");
   const created = await requestJson(
@@ -128,12 +132,12 @@ async function upsertPersonWithStage(
       body: JSON.stringify({
         data: {
           values: {
-            email_addresses: [{ email_address: person.email }],
+            email_addresses: [{ email_address: email }],
             name: [
               {
-                first_name: first || person.email,
+                first_name: first || email,
                 last_name: last,
-                full_name: person.name || person.email,
+                full_name: person.name || email,
               },
             ],
           },
@@ -306,6 +310,8 @@ export async function importBrevoCampaignsToAttio(input: {
         `Skipped campaign ${index + 1}/${campaigns.length} (${message}). Continuing…`,
       );
     }
+    // Brevo rate-limits export processes — brief pause between campaigns.
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   if (!merged.size) {
