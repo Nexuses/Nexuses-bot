@@ -8,6 +8,7 @@ import {
 } from "@/lib/attachments";
 import { deleteChatUpload, loadChatUploadFile } from "@/lib/chat-uploads";
 import { ensureAutomationRunner } from "@/lib/automations";
+import { ensureChatJobRunner } from "@/lib/chat-jobs";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
 import { HTML_DASHBOARD_PROMPT } from "@/lib/html-dashboard-kit";
 import {
@@ -162,6 +163,7 @@ export async function POST(request: Request, { params }: Params) {
   if (error || !session || !project) return error ?? jsonError("Unauthorized", 401);
 
   ensureAutomationRunner();
+  ensureChatJobRunner();
 
   let text = "";
   let files: File[] = [];
@@ -332,7 +334,7 @@ ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user asks who / what is on an Attio list or stage (Hot, Engage, Cold, Prospect, etc.), call attio_list_entries with the list from chat history. Answer with counts + names/emails. Do not ask what the stage means.
-- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). For campaign CSVs with sent/opened/clicked/replied columns, omit stage so engagement maps to stages (or use the stages they named). Never import contacts one API call at a time.
+- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). Large imports run in the background until finished — tell the user that briefly; a follow-up message will appear in chat when done. For campaign CSVs with sent/opened/clicked/replied columns, omit stage so engagement maps to stages (or use the stages they named). Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once. Do not claim it is impossible. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.
@@ -375,6 +377,13 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
       const shareUrls: string[] = [];
       let nudged = false;
       let activeTools = toolDefinitions(integrations);
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`));
+        } catch {
+          // stream closed
+        }
+      }, 12_000);
 
       const publishIntegrations = () => {
         send({
@@ -397,7 +406,10 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
         controller.enqueue(encoder.encode(": connected\n\n"));
         send({
           type: "status",
-          text: openingStatus(text || displayText, files.map((file) => file.name)),
+          text: openingStatus(
+            text || displayText,
+            extracted.map((file) => file.meta.name),
+          ),
         });
 
         const lastAssistantText = String(
@@ -516,6 +528,7 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
                   onStatus: (statusText) => send({ type: "status", text: statusText }),
                   userId: session.userId,
                   projectId: id,
+                  chatId: String(chat._id),
                   projectName: project.name,
                   projectLogo: project.logo,
                   origin: new URL(request.url).origin,
@@ -684,6 +697,7 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
           error: err instanceof Error ? err.message : "Chat failed",
         });
       } finally {
+        clearInterval(heartbeat);
         controller.close();
       }
     },

@@ -795,10 +795,10 @@ async function attioImportToList(
   args: Record<string, unknown>,
   files: { name: string; text: string }[] = [],
   onStatus?: (text: string) => void,
+  context: ToolContext = {},
 ) {
   const listName = String(args.list || args.list_name || args.listName || "").trim();
   if (!listName) throw new Error("List name is required");
-  const stage = String(args.stage || args.status || "").trim();
   const csvText =
     String(args.csv || args.data || "").trim() ||
     files.find((file) => /\.csv$/i.test(file.name))?.text ||
@@ -806,175 +806,53 @@ async function attioImportToList(
     "";
   if (!csvText) throw new Error("No CSV data found. Attach a CSV or pass csv text.");
 
+  const { parseCsv, runAttioCsvImportFromText, ATTIO_IMPORT_BACKGROUND_MIN_ROWS } = await import(
+    "@/lib/attio-import"
+  );
   const allRows = parseCsv(csvText);
   const maxRows = Math.min(Math.max(Number(args.limit) || 2000, 1), 5000);
-  const rows = allRows.slice(0, maxRows);
-  if (!rows.length) throw new Error("CSV has no data rows. Include a header row and at least one contact.");
-  if (allRows.length > maxRows) {
+  const rowCount = Math.min(allRows.length, maxRows);
+  if (!allRows.length) throw new Error("CSV has no data rows. Include a header row and at least one contact.");
+
+  // Long imports keep running in the background so a dropped chat connection cannot kill them.
+  if (
+    context.userId &&
+    context.projectId &&
+    context.chatId &&
+    rowCount >= ATTIO_IMPORT_BACKGROUND_MIN_ROWS
+  ) {
+    const { enqueueAttioCsvImport } = await import("@/lib/chat-jobs");
     onStatus?.(
-      `CSV has ${allRows.length.toLocaleString()} rows — importing first ${maxRows.toLocaleString()} now…`,
+      `Starting background import of ${rowCount.toLocaleString()} contacts — this keeps running even if the chat disconnects…`,
     );
+    const job = await enqueueAttioCsvImport({
+      userId: context.userId,
+      projectId: context.projectId,
+      chatId: context.chatId,
+      listName,
+      csvText,
+      args: { ...args, list: listName },
+      totalRows: rowCount,
+    });
+    return clip({
+      ok: true,
+      background: true,
+      jobId: job._id,
+      list: listName,
+      total: rowCount,
+      totalInFile: allRows.length,
+      note:
+        "Import is running in the background until finished. Tell the user it will keep working even if the network drops, and a result message will appear in this chat when done. Do not say the import failed.",
+    });
   }
 
-  const mapEngagement =
-    String(args.map_engagement ?? args.mapEngagement ?? "").toLowerCase() === "true" ||
-    args.map_engagement === true ||
-    args.mapEngagement === true ||
-    (!stage && csvLooksLikeEngagement(rows));
-
-  onStatus?.(`Looking up "${listName}" in Attio…`);
-  const lists = (await requestJson(`${ATTIO}/v2/lists`, {
-    headers: attioHeaders(apiKey),
-  })) as { data?: { name?: string; api_slug?: string; id?: { list_id?: string } }[] };
-  const list = (lists.data || []).find(
-    (item) =>
-      item.name?.toLowerCase() === listName.toLowerCase() ||
-      item.api_slug?.toLowerCase() === slugify(listName),
-  );
-  if (!list) {
-    const names = (lists.data || []).map((item) => item.name).filter(Boolean);
-    throw new Error(
-      `No Attio list named "${listName}". Available lists: ${names.join(", ") || "none"}`,
-    );
-  }
-  const listId = list.id?.list_id || list.api_slug || "";
-
-  const attributes = (await requestJson(
-    `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes`,
-    { headers: attioHeaders(apiKey) },
-  )) as { data?: { api_slug?: string; title?: string; type?: string }[] };
-  const statusAttr =
-    (attributes.data || []).find((item) => item.type === "status" && /stage|status/i.test(item.api_slug || item.title || "")) ||
-    (attributes.data || []).find((item) => item.type === "status");
-  const stageSlug = statusAttr?.api_slug || "stage";
-
-  const stagesNeeded = new Set<string>();
-  if (mapEngagement) {
-    for (const row of rows) stagesNeeded.add(engagementStageForRow(row, args, stage));
-  } else if (stage) {
-    stagesNeeded.add(stage);
-  }
-
-  if (statusAttr) {
-    for (const needed of stagesNeeded) {
-      if (!needed) continue;
-      try {
-        await requestJson(
-          `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
-          {
-            method: "POST",
-            headers: attioHeaders(apiKey),
-            body: JSON.stringify({ data: { title: needed } }),
-          },
-        );
-      } catch {
-        // Stage already exists.
-      }
-    }
-  }
-
-  const added: string[] = [];
-  const failed: string[] = [];
-  let doneCount = 0;
-  const modeNote = mapEngagement ? " with stages from CSV engagement" : stage ? ` onto "${stage}"` : "";
-  onStatus?.(
-    `Found the list. Importing ${rows.length.toLocaleString()} contact${rows.length === 1 ? "" : "s"}${modeNote}…`,
-  );
-
-  await mapPool(rows, 8, async (row) => {
-    const email = cell(row, [
-      "email",
-      "email address",
-      "e-mail",
-      "work email",
-      "email_address",
-      "lead email",
-      "lead_email",
-    ]);
-    const { first, last, full } = parseName(row);
-    const label = full || email || "row";
-    const rowStage = mapEngagement ? engagementStageForRow(row, args, stage) : stage;
-    if (!email || !email.includes("@")) {
-      failed.push(`${label}: missing email`);
-      doneCount += 1;
-      return;
-    }
-    try {
-      const person = await requestJson(
-        `${ATTIO}/v2/objects/people/records?matching_attribute=email_addresses`,
-        {
-          method: "PUT",
-          headers: attioHeaders(apiKey),
-          body: JSON.stringify({
-            data: {
-              values: {
-                email_addresses: [{ email_address: email }],
-                name: [{ first_name: first || full, last_name: last, full_name: full || email }],
-              },
-            },
-          }),
-        },
-      );
-      const recordId = pickAttioId(person, ["record_id"]);
-      if (!recordId) throw new Error("Person was not created");
-      const payloads = [
-        {
-          parent_record_id: recordId,
-          parent_object: "people",
-          entry_values: rowStage ? { [stageSlug]: rowStage } : {},
-        },
-        {
-          parent_record_id: recordId,
-          parent_object: "people",
-          entry_values: rowStage ? { [stageSlug]: [{ status: rowStage }] } : {},
-        },
-        { parent_record_id: recordId, parent_object: "people", entry_values: {} },
-      ];
-      let listed = false;
-      for (const data of payloads) {
-        try {
-          await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-            method: "PUT",
-            headers: attioHeaders(apiKey),
-            body: JSON.stringify({ data }),
-          });
-          listed = true;
-          break;
-        } catch {
-          // try next payload shape
-        }
-      }
-      if (!listed) {
-        await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-          method: "POST",
-          headers: attioHeaders(apiKey),
-          body: JSON.stringify({ data: payloads[0] }),
-        });
-      }
-      added.push(full || email);
-    } catch (err) {
-      failed.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
-    } finally {
-      doneCount += 1;
-      if (doneCount === 1 || doneCount === rows.length || doneCount % 25 === 0) {
-        onStatus?.(`Uploading contacts to Attio… ${doneCount} / ${rows.length}`);
-      }
-    }
+  const result = await runAttioCsvImportFromText({
+    apiKey,
+    args: { ...args, list: listName },
+    csvText,
+    onStatus: (text) => onStatus?.(text),
   });
-
-  return clip({
-    ok: failed.length === 0,
-    list: list.name,
-    stage: mapEngagement ? "from CSV engagement" : stage || null,
-    mapEngagement,
-    imported: added.length,
-    skipped: failed.length,
-    totalInFile: allRows.length,
-    importedCap: maxRows,
-    truncated: allRows.length > maxRows,
-    names: added.slice(0, 25),
-    errors: failed.slice(0, 15),
-  });
+  return clip(result);
 }
 
 function httpToolParams(extra: Record<string, unknown> = {}) {
@@ -1442,7 +1320,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from an attached CSV (full file is available to this tool) into an existing Attio list. Use ONCE for CSV→Attio. For SmartLead/campaign CSVs with Sent/Opened/Clicked/Replied columns, omit stage (or set map_engagement true) so each row gets the right stage automatically. Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
+            "Import people from an attached CSV into an Attio list. Larger imports run in the BACKGROUND and keep going until finished even if chat disconnects — a result message is posted when done. Use ONCE for CSV→Attio. For campaign CSVs with Sent/Opened/Clicked/Replied, omit stage (or map_engagement true). Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
           parameters: {
             type: "object",
             properties: {
@@ -1860,6 +1738,7 @@ export type ToolContext = {
   onStatus?: (text: string) => void;
   userId?: string;
   projectId?: string;
+  chatId?: string;
   projectName?: string;
   projectLogo?: string;
   origin?: string;
@@ -2482,7 +2361,7 @@ export async function runTool(
 
   if (name === "attio_import_to_list") {
     const attio = findByProvider(integrations, "attio");
-    return attioImportToList(attio.apiKey, args, context.files, context.onStatus);
+    return attioImportToList(attio.apiKey, args, context.files, context.onStatus, context);
   }
 
   if (name === "attio_list_lists") {

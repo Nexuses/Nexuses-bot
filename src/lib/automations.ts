@@ -887,8 +887,17 @@ export function ensureAutomationRunner() {
     void processDueAutomations().catch(() => {
       // keep runner alive
     });
+    void import("@/lib/chat-jobs")
+      .then((mod) => mod.processDueChatJobs())
+      .catch(() => undefined);
   }, 30_000);
   void processDueAutomations().catch(() => undefined);
+  void import("@/lib/chat-jobs")
+    .then((mod) => {
+      mod.ensureChatJobRunner();
+      return mod.processDueChatJobs();
+    })
+    .catch(() => undefined);
 }
 
 export async function startCampaignAutomation(input: {

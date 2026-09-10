@@ -22,6 +22,18 @@ const ACCEPT =
 const MAX_FILES = 5;
 const MAX_BYTES = 32 * 1024 * 1024;
 
+type ChatJobDTO = {
+  _id: string;
+  type: string;
+  status: "queued" | "running" | "completed" | "failed";
+  title: string;
+  chatId: string;
+  progressDone: number;
+  progressTotal: number;
+  lastSummary: string;
+  error: string;
+};
+
 type PendingFile = {
   id: string;
   file: File;
@@ -149,9 +161,11 @@ export function ProjectChat({
   const [dragging, setDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [automations, setAutomations] = useState<AutomationDTO[]>([]);
+  const [chatJobs, setChatJobs] = useState<ChatJobDTO[]>([]);
   const [stoppingId, setStoppingId] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const knownJobIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -188,20 +202,62 @@ export function ProjectChat({
     }
   }
 
-  useEffect(() => {
-    void refreshAutomations();
-    const timer = setInterval(
-      () => void refreshAutomations(),
-      automationsOpen ? 5_000 : 15_000,
-    );
-    return () => clearInterval(timer);
-  }, [project._id, automationsOpen]);
+  async function refreshChatJobs() {
+    try {
+      const qs = activeChatId ? `?chatId=${activeChatId}&active=0` : "?active=0";
+      const res = await fetch(`/api/projects/${project._id}/chat-jobs${qs}`);
+      const data = await res.json();
+      if (!res.ok || !Array.isArray(data.jobs)) return;
+      const jobs = data.jobs as ChatJobDTO[];
+      setChatJobs(jobs.filter((job) => job.status === "queued" || job.status === "running"));
+
+      for (const job of jobs) {
+        const seen = knownJobIds.current.has(job._id);
+        if (!seen) knownJobIds.current.add(job._id);
+        if (
+          seen &&
+          (job.status === "completed" || job.status === "failed") &&
+          job.chatId &&
+          job.chatId === activeChatId
+        ) {
+          const msgRes = await fetch(
+            `/api/projects/${project._id}/messages?chatId=${job.chatId}`,
+          );
+          const msgData = await msgRes.json();
+          if (msgRes.ok && Array.isArray(msgData.messages)) {
+            setMessages(msgData.messages);
+          }
+          knownJobIds.current.delete(job._id);
+        }
+      }
+    } catch {
+      // ignore poll errors
+    }
+  }
 
   useEffect(() => {
-    if (!busy) void refreshAutomations();
+    void refreshAutomations();
+    void refreshChatJobs();
+    const timer = setInterval(() => {
+      void refreshAutomations();
+      void refreshChatJobs();
+    }, automationsOpen || chatJobs.length ? 4_000 : 12_000);
+    return () => clearInterval(timer);
+  }, [project._id, automationsOpen, activeChatId, chatJobs.length]);
+
+  useEffect(() => {
+    if (!busy) {
+      void refreshAutomations();
+      void refreshChatJobs();
+    }
   }, [busy, project._id]);
 
   const runningAutomations = automations.filter((item) => item.status === "running");
+  const activeJobs = chatJobs.filter(
+    (job) =>
+      (job.status === "queued" || job.status === "running") &&
+      (!activeChatId || job.chatId === activeChatId),
+  );
 
   async function stopRunningAutomation(item: AutomationDTO) {
     setStoppingId(item._id);
@@ -477,6 +533,7 @@ export function ProjectChat({
       let doneUserMessage: ChatMessageDTO | undefined;
       let doneChat: ChatThreadDTO | undefined;
       let streamError = "";
+      let trackedChatId = activeChatId;
 
       await readChatEvents(res, (event) => {
         if (event.type === "status" && event.text) setStatus(event.text);
@@ -487,6 +544,7 @@ export function ProjectChat({
           doneMessage = event.message;
           doneUserMessage = event.userMessage;
           doneChat = event.chat;
+          if (event.chat?._id) trackedChatId = event.chat._id;
           if (event.integrations) setIntegrations(event.integrations);
         }
         if (event.type === "error") streamError = event.error || "Chat failed";
@@ -516,8 +574,32 @@ export function ProjectChat({
         setChats((list) => [chat, ...list.filter((item) => item._id !== chat._id)]);
         setChatUrl(chat._id);
       }
+      void refreshChatJobs();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Chat failed");
+      const message = err instanceof Error ? err.message : "Chat failed";
+      const looksNetwork =
+        /network|fetch|failed to fetch|connection|closed before finishing|load failed/i.test(
+          message,
+        );
+
+      if (looksNetwork) {
+        setError("Connection dropped — checking if the task is still running in the background…");
+        setStatus("Waiting for background task…");
+        const recovered = await waitForBackgroundResult(activeChatId, optimistic._id);
+        if (recovered) {
+          setError("");
+          pending.forEach((item) => {
+            if (item.preview) URL.revokeObjectURL(item.preview);
+          });
+          return;
+        }
+      }
+
+      setError(
+        looksNetwork
+          ? `${message} Background imports keep running — a result may still appear in this chat.`
+          : message,
+      );
       setInput(text);
       setFiles(pending);
       setMessages((current) => current.filter((item) => item._id !== optimistic._id));
@@ -525,6 +607,74 @@ export function ProjectChat({
       setBusy(false);
       setStatus("");
     }
+  }
+
+  async function waitForBackgroundResult(chatId: string | null, optimisticId: string) {
+    const deadline = Date.now() + 180_000;
+    let targetChat = chatId;
+
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3500));
+
+      try {
+        const jobRes = await fetch(
+          `/api/projects/${project._id}/chat-jobs?${targetChat ? `chatId=${targetChat}&` : ""}active=0`,
+        );
+        const jobData = await jobRes.json();
+        const jobs = (Array.isArray(jobData.jobs) ? jobData.jobs : []) as ChatJobDTO[];
+        setChatJobs(jobs.filter((j) => j.status === "queued" || j.status === "running"));
+        const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
+        const finished = jobs.find(
+          (j) =>
+            (j.status === "completed" || j.status === "failed") &&
+            (!targetChat || j.chatId === targetChat),
+        );
+        if (active[0]) {
+          if (!targetChat && active[0].chatId) targetChat = active[0].chatId;
+          setStatus(
+            active[0].lastSummary ||
+              `Background task… ${active[0].progressDone || 0}/${active[0].progressTotal || "?"}`,
+          );
+        }
+        if (finished?.chatId) targetChat = finished.chatId;
+      } catch {
+        // keep waiting
+      }
+
+      if (!targetChat) {
+        try {
+          const chatsRes = await fetch(`/api/projects/${project._id}/chats`);
+          const chatsData = await chatsRes.json();
+          if (chatsRes.ok && Array.isArray(chatsData.chats) && chatsData.chats[0]?._id) {
+            targetChat = String(chatsData.chats[0]._id);
+            setActiveChatId(targetChat);
+            setChatUrl(targetChat);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!targetChat) continue;
+
+      try {
+        const res = await fetch(`/api/projects/${project._id}/messages?chatId=${targetChat}`);
+        const data = await res.json();
+        if (!res.ok || !Array.isArray(data.messages)) continue;
+        const list = data.messages as ChatMessageDTO[];
+        if (list.some((item) => item.role === "assistant")) {
+          setActiveChatId(targetChat);
+          setMessages(list);
+          setChatUrl(targetChat);
+          return true;
+        }
+      } catch {
+        // keep waiting
+      }
+    }
+
+    void optimisticId;
+    return false;
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -611,6 +761,21 @@ export function ProjectChat({
           </div>
         </div>
       </header>
+
+      {activeJobs.length ? (
+        <div className="shrink-0 border-b border-line bg-panel/60 px-4 py-2 text-xs text-muted sm:px-6">
+          <div className="mx-auto flex max-w-4xl items-center gap-2">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sea" aria-hidden />
+            <span className="truncate text-sea">
+              {activeJobs[0].lastSummary || activeJobs[0].title}
+              {activeJobs[0].progressTotal
+                ? ` · ${activeJobs[0].progressDone}/${activeJobs[0].progressTotal}`
+                : ""}
+            </span>
+            <span className="shrink-0 text-muted">keeps running until done</span>
+          </div>
+        </div>
+      ) : null}
 
       <main className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col overflow-hidden px-4 sm:px-6">
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-8">
