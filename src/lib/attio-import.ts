@@ -1,17 +1,35 @@
 const ATTIO = "https://api.attio.com";
 
-async function requestJson(url: string, init: RequestInit) {
-  const res = await fetch(url, { ...init, cache: "no-store" });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 800)}`);
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestJson(url: string, init: RequestInit, retries = 7) {
+  let lastError = "";
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const res = await fetch(url, { ...init, cache: "no-store" });
+    const text = await res.text();
+    if (res.status === 429 || res.status === 503) {
+      lastError = `${res.status} ${res.statusText}: ${text.slice(0, 400)}`;
+      const retryAfterRaw = res.headers.get("retry-after");
+      const retryAfterSec = retryAfterRaw ? Number(retryAfterRaw) : NaN;
+      const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(60_000, retryAfterSec * 1000)
+        : Math.min(45_000, 1500 * 2 ** attempt);
+      await sleep(waitMs);
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 800)}`);
+    }
+    if (!text) return "";
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
   }
-  if (!text) return "";
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  throw new Error(lastError || "Attio rate limit exceeded after retries");
 }
 
 function attioHeaders(apiKey: string) {
@@ -313,15 +331,23 @@ function engagementStageForRow(
   fallbackStage: string,
 ) {
   const stageReply = String(args.stage_reply || args.stageReply || "hot").trim() || "hot";
-  const stageClick = String(args.stage_click || args.stageClick || "click").trim() || "click";
-  const stageOpen = String(args.stage_open || args.stageOpen || "open").trim() || "open";
+  const stageClick =
+    String(args.stage_click || args.stageClick || "Clicks").trim() || "Clicks";
+  const stageOpen = String(args.stage_open || args.stageOpen || "Open").trim() || "Open";
   const stageSent =
-    String(args.stage_sent || args.stageSent || fallbackStage || "sent").trim() || "sent";
+    String(
+      args.stage_sent ||
+        args.stageSent ||
+        args.stage_prospect ||
+        args.stageProspect ||
+        fallbackStage ||
+        "Prospect",
+    ).trim() || "Prospect";
   if (rowMatchesCsvFilter(row, "replied")) return stageReply;
   if (rowMatchesCsvFilter(row, "clicked")) return stageClick;
   if (rowMatchesCsvFilter(row, "opened")) return stageOpen;
   if (rowMatchesCsvFilter(row, "sent")) return stageSent;
-  return fallbackStage || "prospect";
+  return fallbackStage || stageSent || "Prospect";
 }
 
 function csvLooksLikeEngagement(rows: Record<string, string>[]) {
@@ -357,12 +383,62 @@ export type AttioImportResult = {
   mapEngagement: boolean;
   imported: number;
   skipped: number;
+  byStage: Record<string, number>;
   totalInFile: number;
   importedCap: number;
   truncated: boolean;
   names: string[];
   errors: string[];
 };
+
+/** Infer Sent/Open/Click section from common export filenames. */
+export function engagementSectionFromFileName(name: string) {
+  const n = name.toLowerCase();
+  if (/click/.test(n)) return "clicked" as const;
+  if (/open/.test(n)) return "opened" as const;
+  if (/deliver|sent|recipient|all.?lead|prospect/.test(n)) return "sent" as const;
+  return "" as const;
+}
+
+/**
+ * Merge delivered/opened/clicked (or Excel) attachments into one engagement CSV
+ * so Click > Open > Prospect dedupe works in a single import.
+ */
+export function mergeSpreadsheetAttachments(
+  files: { name: string; text: string }[],
+  inlineCsv = "",
+) {
+  const sheets = files.filter(
+    (file) =>
+      /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name) ||
+      (file.text.includes(",") &&
+        !file.text.startsWith("Large CSV") &&
+        !file.text.startsWith("Large Excel")),
+  );
+  if (!sheets.length) return inlineCsv.trim();
+
+  const ranked = [...sheets].sort((a, b) => {
+    const rank = (name: string) => {
+      const section = engagementSectionFromFileName(name);
+      if (section === "sent") return 1;
+      if (section === "opened") return 2;
+      if (section === "clicked") return 3;
+      return 4;
+    };
+    return rank(a.name) - rank(b.name);
+  });
+
+  const parts: string[] = [];
+  for (const file of ranked) {
+    const section = engagementSectionFromFileName(file.name);
+    if (section === "clicked") parts.push("CLICKERS — Opened & Clicked a Link");
+    else if (section === "opened") parts.push("OPENS ONLY — Opened Email, No Click");
+    else if (section === "sent") parts.push("SENT — All Emails Delivered");
+    parts.push(file.text.trim());
+  }
+  if (inlineCsv.trim()) parts.push(inlineCsv.trim());
+  return parts.join("\n");
+}
 
 export async function runAttioCsvImportFromText(input: {
   apiKey: string;
@@ -391,7 +467,12 @@ export async function runAttioCsvImportFromText(input: {
     String(input.args.map_engagement ?? input.args.mapEngagement ?? "").toLowerCase() === "true" ||
     input.args.map_engagement === true ||
     input.args.mapEngagement === true ||
+    rows.some((row) => Boolean(row._section)) ||
     (!stage && csvLooksLikeEngagement(rows));
+
+  // If a single stage was passed but rows are multi-section engagement, prefer mapping.
+  const forceMapped = rows.some((row) => Boolean(row._section));
+  const effectiveMapEngagement = mapEngagement || forceMapped;
 
   await input.onStatus?.(`Looking up "${listName}" in Attio…`, 0, rows.length);
   const lists = (await requestJson(`${ATTIO}/v2/lists`, {
@@ -421,7 +502,7 @@ export async function runAttioCsvImportFromText(input: {
   const stageSlug = statusAttr?.api_slug || "stage";
 
   const stagesNeeded = new Set<string>();
-  if (mapEngagement) {
+  if (effectiveMapEngagement) {
     for (const row of rows) stagesNeeded.add(engagementStageForRow(row, input.args, stage));
   } else if (stage) {
     stagesNeeded.add(stage);
@@ -447,22 +528,25 @@ export async function runAttioCsvImportFromText(input: {
 
   const added: string[] = [];
   const failed: string[] = [];
+  const byStage: Record<string, number> = {};
   let doneCount = 0;
-  const modeNote = mapEngagement
+  const modeNote = effectiveMapEngagement
     ? " with stages from CSV engagement"
     : stage
       ? ` onto "${stage}"`
       : "";
   await input.onStatus?.(
-    `Found the list. Importing ${rows.length.toLocaleString()} contact${rows.length === 1 ? "" : "s"}${modeNote}…`,
+    `Found the list. Importing ${rows.length.toLocaleString()} contact${rows.length === 1 ? "" : "s"}${modeNote} (throttled for Attio)…`,
     0,
     rows.length,
   );
 
-  await mapPool(rows, 8, async (row) => {
+  // Attio rate-limits ~heavily under parallel PUTs — keep concurrency low and retry 429s.
+  await mapPool(rows, 2, async (row) => {
     if (input.shouldCancel?.()) {
       throw new Error("Stopped by user");
     }
+    await sleep(120);
     const email = cell(row, [
       "email",
       "email address",
@@ -474,7 +558,9 @@ export async function runAttioCsvImportFromText(input: {
     ]);
     const { first, last, full } = parseName(row);
     const label = full || email || "row";
-    const rowStage = mapEngagement ? engagementStageForRow(row, input.args, stage) : stage;
+    const rowStage = effectiveMapEngagement
+      ? engagementStageForRow(row, input.args, stage)
+      : stage;
     if (!email || !email.includes("@")) {
       failed.push(`${label}: missing email`);
       doneCount += 1;
@@ -544,6 +630,8 @@ export async function runAttioCsvImportFromText(input: {
         });
       }
       added.push(full || email);
+      const stageKey = rowStage || "(no stage)";
+      byStage[stageKey] = (byStage[stageKey] || 0) + 1;
     } catch (err) {
       failed.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
     } finally {
@@ -561,10 +649,11 @@ export async function runAttioCsvImportFromText(input: {
   return {
     ok: failed.length === 0,
     list: String(list.name || listName),
-    stage: mapEngagement ? "from CSV engagement" : stage || null,
-    mapEngagement,
+    stage: effectiveMapEngagement ? "from CSV engagement" : stage || null,
+    mapEngagement: effectiveMapEngagement,
     imported: added.length,
     skipped: failed.length,
+    byStage,
     totalInFile: allRows.length,
     importedCap: maxRows,
     truncated: allRows.length > maxRows,

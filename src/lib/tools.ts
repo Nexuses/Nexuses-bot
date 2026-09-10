@@ -799,16 +799,45 @@ async function attioImportToList(
 ) {
   const listName = String(args.list || args.list_name || args.listName || "").trim();
   if (!listName) throw new Error("List name is required");
+
+  const {
+    parseCsv,
+    runAttioCsvImportFromText,
+    mergeSpreadsheetAttachments,
+    engagementSectionFromFileName,
+    ATTIO_IMPORT_BACKGROUND_MIN_ROWS,
+  } = await import("@/lib/attio-import");
+
+  const sheetFiles = files.filter(
+    (file) =>
+      /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name) ||
+      (file.text.includes(",") &&
+        !file.text.startsWith("Large CSV") &&
+        !file.text.startsWith("Large Excel")),
+  );
   const csvText =
-    String(args.csv || args.data || "").trim() ||
-    files.find((file) => /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name))?.text ||
-    files.find((file) => file.text.includes(",") && !file.text.startsWith("Large CSV"))?.text ||
+    mergeSpreadsheetAttachments(sheetFiles, String(args.csv || args.data || "").trim()) ||
+    sheetFiles[0]?.text ||
     "";
   if (!csvText) throw new Error("No spreadsheet data found. Attach a CSV or Excel (.xlsx/.xls) file.");
 
-  const { parseCsv, runAttioCsvImportFromText, ATTIO_IMPORT_BACKGROUND_MIN_ROWS } = await import(
-    "@/lib/attio-import"
-  );
+  const multiEngagement =
+    sheetFiles.filter((file) => engagementSectionFromFileName(file.name)).length >= 2;
+  const importArgs: Record<string, unknown> = {
+    ...args,
+    list: listName,
+    stage_prospect: args.stage_prospect || args.stageProspect || args.stage_sent || "Prospect",
+    stage_sent: args.stage_sent || args.stageSent || args.stage_prospect || "Prospect",
+    stage_open: args.stage_open || args.stageOpen || "Open",
+    stage_click: args.stage_click || args.stageClick || "Clicks",
+  };
+  if (multiEngagement) {
+    // Don't pin everyone to one stage when delivered/opened/clicked files are attached together.
+    delete importArgs.stage;
+    delete importArgs.status;
+    importArgs.map_engagement = true;
+  }
+
   const allRows = parseCsv(csvText);
   const maxRows = Math.min(Math.max(Number(args.limit) || 2000, 1), 5000);
   const rowCount = Math.min(allRows.length, maxRows);
@@ -823,7 +852,7 @@ async function attioImportToList(
   ) {
     const { enqueueAttioCsvImport } = await import("@/lib/chat-jobs");
     onStatus?.(
-      `Starting background import of ${rowCount.toLocaleString()} contacts — this keeps running even if the chat disconnects…`,
+      `Starting background import of ${rowCount.toLocaleString()} contacts into “${listName}” — throttled for Attio, keeps running until finished…`,
     );
     const job = await enqueueAttioCsvImport({
       userId: context.userId,
@@ -831,7 +860,7 @@ async function attioImportToList(
       chatId: context.chatId,
       listName,
       csvText,
-      args: { ...args, list: listName },
+      args: importArgs,
       totalRows: rowCount,
     });
     context.onChatJob?.(job);
@@ -842,14 +871,15 @@ async function attioImportToList(
       list: listName,
       total: rowCount,
       totalInFile: allRows.length,
+      files: sheetFiles.map((f) => f.name),
       note:
-        "Import is running in the background until finished. Tell the user it will keep working even if the network drops, and a result message will appear in this chat when done. Do not say the import failed.",
+        "Import is running in the background into the named Attio list until finished. Tell the user the list name and that stages are Click > Open > Prospect when multiple engagement files were attached. A result message with per-stage counts will appear when done. Do not invent counts.",
     });
   }
 
   const result = await runAttioCsvImportFromText({
     apiKey,
-    args: { ...args, list: listName },
+    args: importArgs,
     csvText,
     onStatus: (text) => onStatus?.(text),
   });
@@ -1321,7 +1351,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from an attached CSV or Excel (.xlsx/.xls) into an Attio list. Larger imports run in the BACKGROUND and keep going until finished even if chat disconnects — a result message is posted when done. Use ONCE for spreadsheet→Attio. For campaign reports with Sent/Opened/Clicked sections, omit stage (or map_engagement true). Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
+            "Import people from attached CSV/Excel into an Attio list. When delivered+opened+clicked files are attached together, merge them once (Click > Open > Prospect). Larger imports run in the BACKGROUND with Attio rate-limit retries until finished. Use ONCE. Defaults: Prospect / Open / Clicks. Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
           parameters: {
             type: "object",
             properties: {

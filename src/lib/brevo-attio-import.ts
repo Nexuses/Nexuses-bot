@@ -11,16 +11,31 @@ function attioHeaders(apiKey: string) {
   };
 }
 
-async function requestJson(url: string, init: RequestInit) {
-  const res = await fetch(url, { ...init, cache: "no-store" });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 800)}`);
-  if (!text) return "";
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
+async function requestJson(url: string, init: RequestInit, retries = 7) {
+  let lastError = "";
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const res = await fetch(url, { ...init, cache: "no-store" });
+    const text = await res.text();
+    if (res.status === 429 || res.status === 503) {
+      lastError = `${res.status} ${res.statusText}: ${text.slice(0, 400)}`;
+      const retryAfterRaw = res.headers.get("retry-after");
+      const retryAfterSec = retryAfterRaw ? Number(retryAfterRaw) : NaN;
+      const waitMs =
+        Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(60_000, retryAfterSec * 1000)
+          : Math.min(45_000, 1500 * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 800)}`);
+    if (!text) return "";
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
   }
+  throw new Error(lastError || "Attio rate limit exceeded after retries");
 }
 
 function slugify(value: string) {
@@ -333,7 +348,7 @@ export async function importBrevoCampaignsToAttio(input: {
     people.length,
   );
 
-  await mapPool(people, 8, async (person) => {
+  await mapPool(people, 2, async (person) => {
     if (input.shouldCancel?.()) throw new Error("Stopped by user");
     try {
       await upsertPersonWithStage(

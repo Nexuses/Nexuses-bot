@@ -257,9 +257,14 @@ async function runAttioCsvImportJob(job: {
     : result.stage
       ? `onto “${result.stage}”`
       : "";
+  const byStage = result.byStage && typeof result.byStage === "object" ? result.byStage : {};
+  const stageLines = Object.entries(byStage)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, count]) => `- **${name}**: ${Number(count).toLocaleString()}`);
   const content = [
     `**Import finished** — ${result.imported.toLocaleString()} contacts into **${result.list}**${stageNote ? ` (${stageNote})` : ""}.`,
-    result.skipped ? `${result.skipped.toLocaleString()} skipped.` : "",
+    stageLines.length ? stageLines.join("\n") : "",
+    result.skipped ? `${result.skipped.toLocaleString()} skipped (will need retry if rate-limited).` : "",
     result.truncated
       ? `File had ${result.totalInFile.toLocaleString()} rows; imported first ${result.importedCap.toLocaleString()}.`
       : "",
