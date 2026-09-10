@@ -1,10 +1,14 @@
 import type { ChatAttachment } from "@/types/chat";
 
 export const MAX_CHAT_FILES = 5;
-export const MAX_CHAT_FILE_BYTES = 8 * 1024 * 1024;
+/** Raised so campaign report CSVs (multi‑MB) can upload. */
+export const MAX_CHAT_FILE_BYTES = 32 * 1024 * 1024;
 export const MAX_EXTRACTED_CHARS = 40_000;
-export const MAX_CSV_CHARS = 400_000;
-export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+/** Max chars kept in memory for tools (imports / dashboards). */
+export const MAX_CSV_FULL_CHARS = 25 * 1024 * 1024;
+/** What the model sees — never dump megabyte CSVs into the chat LLM. */
+export const MAX_CSV_PROMPT_CHARS = 12_000;
+export const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 
 const TEXT_EXT = new Set([
   "txt",
@@ -37,7 +41,10 @@ export type ExtractedImage = {
 
 export type ExtractedFile = {
   meta: ChatAttachment;
+  /** Compact text for the LLM (summaries for large CSVs). */
   text: string;
+  /** Full file contents for tools (CSV import / dashboards). */
+  fullText?: string;
   image?: ExtractedImage;
 };
 
@@ -49,6 +56,40 @@ function clip(text: string, max = MAX_EXTRACTED_CHARS) {
 
 function extOf(name: string) {
   return name.split(".").pop()?.toLowerCase() || "";
+}
+
+function isCsvLike(name: string, type: string) {
+  const ext = extOf(name);
+  return ext === "csv" || ext === "tsv" || type.includes("csv") || type.includes("tab-separated");
+}
+
+/** Build a short LLM-facing summary so large CSVs do not blow the context window. */
+export function summarizeCsvForPrompt(raw: string, name: string, byteSize: number) {
+  const cleaned = raw.replace(/\u0000/g, "");
+  const lines = cleaned.split(/\r?\n/).filter((line) => line.length > 0);
+  const header = lines[0] || "(no header)";
+  const dataCount = Math.max(0, lines.length - 1);
+  const headSample = lines.slice(1, 16).join("\n");
+  const tailSample = dataCount > 20 ? lines.slice(-5).join("\n") : "";
+  const sizeMb = (byteSize / (1024 * 1024)).toFixed(1);
+
+  const body = [
+    `Large CSV attached: "${name}" (${sizeMb} MB, ~${dataCount.toLocaleString()} data rows — row count is approximate if cells contain newlines).`,
+    `Columns: ${header}`,
+    "",
+    "First rows (sample):",
+    headSample || "(empty)",
+    "",
+    tailSample ? `Last rows (sample):\n${tailSample}\n` : "",
+    "IMPORTANT: The full CSV is available to tools only (not pasted here).",
+    "For dashboards/reports: call share_csv_dashboard (uses the full attached file).",
+    "For Attio import: call attio_import_to_list once (uses the full attached file).",
+    "Do not ask the user to re-upload or paste the CSV. Do not invent rows.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return clip(body, MAX_CSV_PROMPT_CHARS);
 }
 
 async function extractPdf(bytes: Uint8Array) {
@@ -67,7 +108,9 @@ export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
   };
 
   if (file.size > MAX_CHAT_FILE_BYTES) {
-    throw new Error(`${meta.name} is larger than 8MB`);
+    throw new Error(
+      `${meta.name} is larger than ${Math.round(MAX_CHAT_FILE_BYTES / (1024 * 1024))}MB`,
+    );
   }
 
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -77,7 +120,7 @@ export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
 
   if (imageMime) {
     if (bytes.byteLength > MAX_IMAGE_BYTES) {
-      throw new Error(`${meta.name} is larger than 4MB. Compress the image and try again.`);
+      throw new Error(`${meta.name} is larger than 6MB. Compress the image and try again.`);
     }
     return {
       meta: { ...meta, type: imageMime },
@@ -120,8 +163,27 @@ export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
   }
 
   const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  const limit = ext === "csv" || ext === "tsv" || meta.type.includes("csv") ? MAX_CSV_CHARS : MAX_EXTRACTED_CHARS;
-  return { meta, text: clip(raw, limit) || `File "${meta.name}" was empty.` };
+  if (!raw.trim()) {
+    return { meta, text: `File "${meta.name}" was empty.` };
+  }
+
+  if (isCsvLike(meta.name, meta.type)) {
+    const fullText =
+      raw.length > MAX_CSV_FULL_CHARS
+        ? `${raw.slice(0, MAX_CSV_FULL_CHARS)}\n…truncated for storage`
+        : raw;
+    const truncatedStorage = raw.length > MAX_CSV_FULL_CHARS;
+    const summary = summarizeCsvForPrompt(fullText, meta.name, meta.size);
+    return {
+      meta,
+      text: truncatedStorage
+        ? `${summary}\n\nNote: file exceeded ${Math.round(MAX_CSV_FULL_CHARS / (1024 * 1024))}MB text cap; tools see a truncated copy.`
+        : summary,
+      fullText,
+    };
+  }
+
+  return { meta, text: clip(raw, MAX_EXTRACTED_CHARS) };
 }
 
 export function buildFilePrompt(message: string, files: ExtractedFile[]) {
@@ -133,4 +195,12 @@ export function buildFilePrompt(message: string, files: ExtractedFile[]) {
     return `### ${file.meta.name}\nType: ${file.meta.type || "unknown"} · ${file.meta.size} bytes\n\n${file.text}`;
   });
   return `${message}\n\nAttached files (use this data to complete the request):\n\n${blocks.join("\n\n")}`;
+}
+
+export function toolFilePayload(files: ExtractedFile[]) {
+  return files.map((item) => ({
+    name: item.meta.name,
+    text: item.fullText || item.text,
+    summary: item.text,
+  }));
 }

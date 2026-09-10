@@ -500,20 +500,64 @@ function splitCsvLine(line: string) {
 }
 
 function parseCsv(text: string) {
-  const lines = text
-    .replace(/^\uFEFF/, "")
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim());
-  if (lines.length < 2) return [];
-  const headers = splitCsvLine(lines[0]).map((header) => header.trim().toLowerCase());
-  return lines.slice(1).map((line) => {
-    const cols = splitCsvLine(line);
-    const row: Record<string, string> = {};
+  const input = text.replace(/^\uFEFF/, "");
+  const table: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+
+  const pushCell = () => {
+    row.push(cell.trim());
+    cell = "";
+  };
+  const pushRow = () => {
+    // Skip fully empty trailing rows
+    if (row.some((value) => value.length > 0)) table.push(row);
+    row = [];
+  };
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (quoted) {
+      if (char === '"') {
+        if (input[i + 1] === '"') {
+          cell += '"';
+          i += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === "," || char === "\t") {
+      pushCell();
+      continue;
+    }
+    if (char === "\n") {
+      pushCell();
+      pushRow();
+      continue;
+    }
+    if (char === "\r") continue;
+    cell += char;
+  }
+  pushCell();
+  pushRow();
+
+  if (table.length < 2) return [] as Record<string, string>[];
+  const headers = table[0].map((header) => header.trim().toLowerCase());
+  return table.slice(1).map((cols) => {
+    const record: Record<string, string> = {};
     headers.forEach((header, index) => {
-      if (header) row[header] = (cols[index] || "").trim().replace(/^"|"$/g, "");
+      if (header) record[header] = (cols[index] || "").trim().replace(/^"|"$/g, "");
     });
-    return row;
+    return record;
   });
 }
 
@@ -526,7 +570,7 @@ function cell(row: Record<string, string>, keys: string[]) {
 }
 
 function parseName(row: Record<string, string>) {
-  const full = cell(row, ["name", "full name", "full_name", "contact"]);
+  const full = cell(row, ["name", "full name", "full_name", "contact", "lead name", "lead_name"]);
   let first = cell(row, ["first name", "first_name", "firstname", "first"]);
   let last = cell(row, ["last name", "last_name", "lastname", "last", "surname"]);
   if (!first && full) {
@@ -535,6 +579,177 @@ function parseName(row: Record<string, string>) {
     last = parts.slice(1).join(" ");
   }
   return { first, last, full: full || [first, last].filter(Boolean).join(" ") };
+}
+
+function hasEngagementValue(value: string) {
+  const v = value.trim();
+  if (!v) return false;
+  if (/^(0|false|no|n\/a|na|-)$/i.test(v)) return false;
+  return true;
+}
+
+function rowMatchesCsvFilter(row: Record<string, string>, filter: string) {
+  const f = filter.toLowerCase();
+  if (!f || f === "all") return true;
+  if (f === "opened" || f === "open") {
+    return (
+      hasEngagementValue(cell(row, ["opened time", "opened_time", "open time", "opened"])) ||
+      Number(cell(row, ["open count", "open_count", "opens"]) || 0) > 0
+    );
+  }
+  if (f === "clicked" || f === "click") {
+    return (
+      hasEngagementValue(cell(row, ["clicked time", "clicked_time", "click time", "clicked"])) ||
+      Number(cell(row, ["click count", "click_count", "clicks"]) || 0) > 0
+    );
+  }
+  if (f === "replied" || f === "reply") {
+    return (
+      hasEngagementValue(cell(row, ["replied time", "replied_time", "reply time", "replied"])) ||
+      hasEngagementValue(cell(row, ["reply message", "reply_message", "reply"]))
+    );
+  }
+  if (f === "sent") {
+    return (
+      hasEngagementValue(cell(row, ["sent time", "sent_time", "sent"])) ||
+      hasEngagementValue(cell(row, ["sent email", "sent_email"]))
+    );
+  }
+  if (f === "unsubscribed") {
+    const raw = cell(row, ["is unsubscribed", "unsubscribed", "unsubscribe"]);
+    return /^(1|true|yes)$/i.test(raw.trim());
+  }
+  return true;
+}
+
+const CSV_DASH_SKIP_HEADERS = new Set([
+  "reply message",
+  "reply_message",
+  "sent email",
+  "sent_email",
+  "email body",
+  "body",
+  "html",
+  "message",
+]);
+
+function pickCsvDashboardColumns(sample: Record<string, string>) {
+  const keys = Object.keys(sample);
+  const preferred = [
+    "lead name",
+    "name",
+    "lead email",
+    "email",
+    "sequence number",
+    "sequence",
+    "sent time",
+    "opened time",
+    "clicked time",
+    "replied time",
+    "open count",
+    "click count",
+    "is unsubscribed",
+  ];
+  const chosen: string[] = [];
+  for (const want of preferred) {
+    const match = keys.find(
+      (header) =>
+        header === want || header.replace(/[_\s]+/g, "") === want.replace(/[_\s]+/g, ""),
+    );
+    if (match && !CSV_DASH_SKIP_HEADERS.has(match) && !chosen.includes(match)) {
+      chosen.push(match);
+    }
+  }
+  for (const key of keys) {
+    if (chosen.length >= 10) break;
+    if (CSV_DASH_SKIP_HEADERS.has(key)) continue;
+    if (!chosen.includes(key)) chosen.push(key);
+  }
+  return chosen.length ? chosen : keys.slice(0, 8);
+}
+
+function titleCaseHeader(header: string) {
+  return header
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function buildCsvDashboardPayload(
+  rows: Record<string, string>[],
+  opts: { title: string; subtitle?: string; filter: string; limit: number },
+) {
+  const filtered = rows.filter((row) => rowMatchesCsvFilter(row, opts.filter));
+  const total = rows.length;
+  const opened = rows.filter((row) => rowMatchesCsvFilter(row, "opened")).length;
+  const clicked = rows.filter((row) => rowMatchesCsvFilter(row, "clicked")).length;
+  const replied = rows.filter((row) => rowMatchesCsvFilter(row, "replied")).length;
+  const sent = rows.filter((row) => rowMatchesCsvFilter(row, "sent")).length;
+  const columns = rows[0] ? pickCsvDashboardColumns(rows[0]) : [];
+  const display = filtered.slice(0, opts.limit);
+  const tableRows = display.map((row) => columns.map((col) => {
+    const value = row[col] || "";
+    return value.length > 120 ? `${value.slice(0, 117)}…` : value;
+  }));
+
+  const kpis = [
+    { label: "Leads", value: String(total.toLocaleString()) },
+    { label: "Sent", value: String(sent.toLocaleString()) },
+    { label: "Opened", value: String(opened.toLocaleString()) },
+    { label: "Clicked", value: String(clicked.toLocaleString()) },
+    { label: "Replied", value: String(replied.toLocaleString()) },
+  ];
+  if (opts.filter && opts.filter !== "all") {
+    kpis.push({
+      label: `Showing (${opts.filter})`,
+      value: String(filtered.length.toLocaleString()),
+    });
+  }
+
+  const chart =
+    opened + clicked + replied > 0
+      ? {
+          type: "doughnut" as const,
+          title: "Engagement",
+          labels: ["Opened", "Clicked", "Replied", "Other sent"],
+          values: [
+            opened,
+            clicked,
+            replied,
+            Math.max(0, sent - opened),
+          ],
+        }
+      : undefined;
+
+  const truncated = filtered.length > display.length;
+  const subtitleParts = [
+    opts.subtitle,
+    truncated
+      ? `Table shows ${display.length.toLocaleString()} of ${filtered.length.toLocaleString()} matching rows (KPIs cover the full file).`
+      : filtered.length !== total
+        ? `${filtered.length.toLocaleString()} matching rows of ${total.toLocaleString()}.`
+        : `${total.toLocaleString()} rows from CSV.`,
+  ].filter(Boolean);
+
+  return {
+    title: opts.title,
+    subtitle: subtitleParts.join(" "),
+    kpis,
+    columns: columns.map(titleCaseHeader),
+    rows: tableRows,
+    chart,
+    stats: {
+      total,
+      filtered: filtered.length,
+      shown: display.length,
+      truncated,
+      opened,
+      clicked,
+      replied,
+      sent,
+    },
+  };
 }
 
 async function attioImportToList(
@@ -548,12 +763,20 @@ async function attioImportToList(
   const stage = String(args.stage || args.status || "").trim();
   const csvText =
     String(args.csv || args.data || "").trim() ||
-    files.find((file) => /\.csv$/i.test(file.name) || file.text.includes(","))?.text ||
+    files.find((file) => /\.csv$/i.test(file.name))?.text ||
+    files.find((file) => file.text.includes(","))?.text ||
     "";
   if (!csvText) throw new Error("No CSV data found. Attach a CSV or pass csv text.");
 
-  const rows = parseCsv(csvText).slice(0, 150);
+  const allRows = parseCsv(csvText);
+  const maxRows = Math.min(Math.max(Number(args.limit) || 2000, 1), 5000);
+  const rows = allRows.slice(0, maxRows);
   if (!rows.length) throw new Error("CSV has no data rows. Include a header row and at least one contact.");
+  if (allRows.length > maxRows) {
+    onStatus?.(
+      `CSV has ${allRows.length.toLocaleString()} rows — importing first ${maxRows.toLocaleString()} now…`,
+    );
+  }
 
   onStatus?.(`Looking up "${listName}" in Attio…`);
   const lists = (await requestJson(`${ATTIO}/v2/lists`, {
@@ -680,6 +903,9 @@ async function attioImportToList(
     stage: stage || null,
     imported: added.length,
     skipped: failed.length,
+    totalInFile: allRows.length,
+    importedCap: maxRows,
+    truncated: allRows.length > maxRows,
     names: added.slice(0, 25),
     errors: failed.slice(0, 15),
   });
@@ -960,6 +1186,38 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
     {
       type: "function",
       function: {
+        name: "share_csv_dashboard",
+        description:
+          "BEST for large attached CSVs (campaign reports, lead exports, multi‑MB files). Reads the FULL attached CSV on the server — do NOT pass row data or paste CSV. Builds KPIs + branded HTML table. Use filter opened|clicked|replied|sent when the user asks who opened/clicked/etc. Prefer this over share_data_dashboard when a CSV file is attached.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Dashboard title" },
+            subtitle: { type: "string" },
+            filter: {
+              type: "string",
+              description:
+                "Optional row filter: all (default), opened, clicked, replied, sent, unsubscribed",
+            },
+            limit: {
+              type: "number",
+              description: "Max table rows to show (default 400, max 1000). KPIs still use the full file.",
+            },
+            file_name: {
+              type: "string",
+              description: "Optional attached CSV file name when multiple files are present",
+            },
+            client_logo: { type: "string" },
+            client_name: { type: "string" },
+          },
+          required: ["title"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "start_campaign_automation",
         description:
           "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal, Nexuses Outreach 1-1, SmartLead (webhooks for sent/open/click), AND other custom APIs. SmartLead: API lacks reliable open/click/sent — start with SmartLead integration + attio_list; bot returns webhook_url to paste in SmartLead (enable EMAIL_SENT, EMAIL_OPEN, EMAIL_LINK_CLICK). Unified watch-all: watch_all true or campaign \"*\".",
@@ -1118,7 +1376,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from an attached CSV (or csv text) into an existing Attio list, optionally onto a stage. Use this ONCE when the user uploads a CSV and asks to add/upload contacts to Attio. Do not call attio_api once per row.",
+            "Import people from an attached CSV (full file is available to this tool) into an existing Attio list, optionally onto a stage. Use ONCE when the user uploads a CSV for Attio. Do not call attio_api once per row. Do not ask the user to paste the CSV. Defaults to first 2000 rows (max 5000 via limit).",
           parameters: {
             type: "object",
             properties: {
@@ -1127,6 +1385,10 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               csv: {
                 type: "string",
                 description: "CSV text including header row. Omit if a CSV file is already attached.",
+              },
+              limit: {
+                type: "number",
+                description: "Max rows to import (default 2000, max 5000).",
               },
             },
             required: ["list"],
@@ -1498,7 +1760,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
 }
 
 export type ToolContext = {
-  files?: { name: string; text: string }[];
+  files?: { name: string; text: string; summary?: string }[];
   onStatus?: (text: string) => void;
   userId?: string;
   projectId?: string;
@@ -1521,8 +1783,11 @@ export async function runTool(
     else if (rawArgs) args = JSON.parse(rawArgs);
   } catch {
     const hint =
-      name === "share_html" || name.startsWith("share_html_") || name === "share_data_dashboard"
-        ? " HTML/tool JSON was truncated. For large pages use share_data_dashboard (rows as JSON) or share_html_begin → share_html_append (≤12000 chars) → share_html_finish."
+      name === "share_html" ||
+      name.startsWith("share_html_") ||
+      name === "share_data_dashboard" ||
+      name === "share_csv_dashboard"
+        ? " HTML/tool JSON was truncated. For attached CSVs use share_csv_dashboard (no row payload). Otherwise share_data_dashboard or share_html_begin → append → finish."
         : "";
     throw new Error(`Invalid tool arguments.${hint}`);
   }
@@ -1709,6 +1974,65 @@ export async function runTool(
       url: share.url,
       rows: rows.length,
       note: "Server-built dashboard. Paste as [Open report](url) so chat shows Preview HTML.",
+    });
+  }
+
+  if (name === "share_csv_dashboard") {
+    if (!context.userId) throw new Error("Cannot create a share link in this context");
+    const title = String(args.title || "").trim();
+    if (!title) throw new Error("title is required");
+    const fileName = String(args.file_name || args.fileName || "").trim().toLowerCase();
+    const files = context.files || [];
+    const csvText =
+      String(args.csv || "").trim() ||
+      (fileName
+        ? files.find((file) => file.name.toLowerCase() === fileName)?.text
+        : undefined) ||
+      files.find((file) => /\.csv$/i.test(file.name))?.text ||
+      files.find((file) => file.text.includes(",") && !file.text.startsWith("Large CSV"))?.text ||
+      "";
+    if (!csvText) {
+      throw new Error(
+        "No attached CSV found. Ask the user to attach the CSV file, then call share_csv_dashboard again (do not invent rows).",
+      );
+    }
+    context.onStatus?.("Parsing the CSV…");
+    const parsed = parseCsv(csvText);
+    if (!parsed.length) throw new Error("CSV has no data rows.");
+    const filter = String(args.filter || "all").trim() || "all";
+    const limit = Math.min(Math.max(Number(args.limit) || 400, 1), 1000);
+    context.onStatus?.(`Building dashboard from ${parsed.length.toLocaleString()} rows…`);
+    const dashboard = buildCsvDashboardPayload(parsed, {
+      title,
+      subtitle: String(args.subtitle || "").trim() || undefined,
+      filter,
+      limit,
+    });
+    const share = await createDataDashboardShare({
+      userId: context.userId,
+      projectId: context.projectId,
+      origin: context.origin,
+      clientLogoUrl:
+        String(args.client_logo || args.clientLogo || context.projectLogo || "").trim() ||
+        undefined,
+      clientName:
+        String(args.client_name || args.clientName || context.projectName || "").trim() ||
+        undefined,
+      dashboard: {
+        title: dashboard.title,
+        subtitle: dashboard.subtitle,
+        kpis: dashboard.kpis,
+        columns: dashboard.columns,
+        rows: dashboard.rows,
+        chart: dashboard.chart,
+      },
+    });
+    return clip({
+      ok: true,
+      title: share.title,
+      url: share.url,
+      ...dashboard.stats,
+      note: "Built from the full attached CSV on the server. Paste as [Open report](url).",
     });
   }
 

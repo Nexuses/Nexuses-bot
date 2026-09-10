@@ -20,7 +20,7 @@ import type { ProjectDTO, SessionUser } from "@/types";
 const ACCEPT =
   ".pdf,.txt,.md,.csv,.tsv,.json,.xml,.html,.htm,.log,.yml,.yaml,.png,.jpg,.jpeg,.webp,.gif";
 const MAX_FILES = 5;
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 32 * 1024 * 1024;
 
 type PendingFile = {
   id: string;
@@ -312,7 +312,7 @@ export function ProjectChat({
           break;
         }
         if (file.size > MAX_BYTES) {
-          setError(`${file.name} is larger than 8MB`);
+          setError(`${file.name} is larger than 32MB`);
           continue;
         }
         const duplicate = next.some(

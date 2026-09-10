@@ -306,7 +306,7 @@ ${KIT_HEAD}
 }
 
 export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / shareable pages:
-- Prefer share_data_dashboard for campaign/lead reports with tables (pass title, kpis, columns, rows as JSON). The server builds the full HTML — do NOT emit hundreds of table rows yourself.
+- Prefer share_csv_dashboard when a CSV file is attached (server reads the full file — do not pass rows). Prefer share_data_dashboard for campaign/lead reports when you already have structured JSON (pass title, kpis, columns, rows). The server builds the full HTML — do NOT emit hundreds of table rows yourself.
 - For custom one-off HTML that is SMALL (roughly under ~40 table rows or a short page): call share_html once with the full HTML, and optionally also show a short \`\`\`html preview fence.
 - For LARGE custom HTML (long tables, multi-section reports): NEVER put the full document in one share_html call or one fence (it truncates and breaks JSON). Instead:
   1) share_html_begin
@@ -321,4 +321,4 @@ export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / 
   Put the project/client logo on the right when available. Do not invent another Nexuses logo URL.
 - Layout: one clear hero title + short subtitle, then a row of KPI stat cards, then one chart and/or one real HTML <table> (never markdown pipe tables inside HTML).
 - Prefer semantic HTML + Tailwind utility classes. No React. Inline a small <script> only for Chart.js.
-- Never invent /p/... URLs. Never claim a size limit forces splitting into multiple dashboards when share_data_dashboard or chunked share_html_* can publish one page.`;
+- Never invent /p/... URLs. Never claim a size limit forces splitting into multiple dashboards when share_csv_dashboard, share_data_dashboard, or chunked share_html_* can publish one page.`;

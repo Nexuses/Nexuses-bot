@@ -3,6 +3,7 @@ import {
   buildFilePrompt,
   extractUploadedFile,
   MAX_CHAT_FILES,
+  toolFilePayload,
   type ExtractedFile,
 } from "@/lib/attachments";
 import { ensureAutomationRunner } from "@/lib/automations";
@@ -264,16 +265,17 @@ Reply style (required — users skim; long essays are a failure):
 
 Formatting (required):
 - Write the final answer in clean Markdown. Prefer short bullets over long paragraphs. Use a heading only when it helps scan.
-- When showing 2 or more items with the same fields, use a Markdown table with a header row — but keep chat tables small (roughly ≤20 rows); for bigger sets use share_data_dashboard / a share link.
+- When showing 2 or more items with the same fields, use a Markdown table with a header row — but keep chat tables small (roughly ≤20 rows); for bigger sets use a share link.
 - When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons — but for LARGE dashboards do not dump the full table in the fence; use tools instead.
 - For a live / public / shareable dashboard link: NEVER invent or guess a /p/... URL — fake links 404.
-- Campaign / lead tables (any size, including 100–500+ rows): call share_data_dashboard with title, kpis, columns, and rows JSON, then paste the returned url as a Markdown link like [Open report](url). The chat UI will show Preview HTML + Open link.
+- Attached CSV (any size, including multi‑MB campaign reports): call share_csv_dashboard with a title (and optional filter opened|clicked|replied|sent). The server reads the FULL file — do not pass rows/CSV text and do not ask the user to re-upload or paste. Then paste [Open report](url).
+- Campaign / lead tables when data is NOT from an attached CSV: call share_data_dashboard with title, kpis, columns, and rows JSON, then paste [Open report](url).
 - Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste the returned url as [Open report](url).
 - Small HTML only: share_html with the full document is fine — also paste [Open report](url) from the tool result.
 ${HTML_DASHBOARD_PROMPT}
-- If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on).
+- If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
-- If the user uploads a CSV for Attio, call attio_import_to_list once. Never import contacts one API call at a time.
+- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once. Do not claim it is impossible. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.
@@ -437,7 +439,7 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
               let result = "";
               try {
                 result = await runTool(call.function.name, call.function.arguments, integrations, {
-                  files: extracted.map((item) => ({ name: item.meta.name, text: item.text })),
+                  files: toolFilePayload(extracted),
                   onStatus: (statusText) => send({ type: "status", text: statusText }),
                   userId: session.userId,
                   projectId: id,
@@ -453,7 +455,8 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
               if (
                 call.function.name === "share_html" ||
                 call.function.name === "share_html_finish" ||
-                call.function.name === "share_data_dashboard"
+                call.function.name === "share_data_dashboard" ||
+                call.function.name === "share_csv_dashboard"
               ) {
                 const url = parseShareUrlFromToolResult(result);
                 if (url) shareUrls.push(url);

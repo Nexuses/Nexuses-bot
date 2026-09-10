@@ -47,6 +47,7 @@ export function statusForTool(name: string) {
     share_html_append: "Uploading HTML chunk…",
     share_html_finish: "Publishing the dashboard…",
     share_data_dashboard: "Building the dashboard…",
+    share_csv_dashboard: "Building the dashboard from your CSV…",
     start_campaign_automation: "Starting automatic campaign updates…",
     list_automations: "Checking automatic updates…",
     stop_automation: "Stopping automatic updates…",
