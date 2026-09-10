@@ -343,6 +343,80 @@ export function ProjectChat({
     if (event.dataTransfer.files.length) addFiles(event.dataTransfer.files);
   }
 
+  async function uploadPendingFile(file: File, onProgress: (label: string) => void) {
+    const CHUNK = 512 * 1024; // stay under common 1MB proxy limits
+    if (file.size <= CHUNK) {
+      const uploadForm = new FormData();
+      uploadForm.set("file", file);
+      const uploadRes = await fetch(`/api/projects/${project._id}/uploads`, {
+        method: "POST",
+        body: uploadForm,
+      });
+      const uploadData = (await uploadRes.json().catch(() => null)) as
+        | { upload?: { id?: string }; error?: string }
+        | null;
+      if (!uploadRes.ok || !uploadData?.upload?.id) {
+        throw new Error(
+          uploadData?.error ||
+            `Upload failed${uploadRes.status ? ` (${uploadRes.status})` : ""}.`,
+        );
+      }
+      return uploadData.upload.id;
+    }
+
+    const totalChunks = Math.ceil(file.size / CHUNK);
+    const beginForm = new FormData();
+    beginForm.set("mode", "begin");
+    beginForm.set("name", file.name);
+    beginForm.set("type", file.type || "application/octet-stream");
+    beginForm.set("size", String(file.size));
+    beginForm.set("totalChunks", String(totalChunks));
+    const beginRes = await fetch(`/api/projects/${project._id}/uploads`, {
+      method: "POST",
+      body: beginForm,
+    });
+    const beginData = (await beginRes.json().catch(() => null)) as
+      | { upload?: { id?: string }; error?: string }
+      | null;
+    if (!beginRes.ok || !beginData?.upload?.id) {
+      throw new Error(beginData?.error || `Could not start upload (${beginRes.status})`);
+    }
+    const uploadId = beginData.upload.id;
+
+    for (let i = 0; i < totalChunks; i += 1) {
+      onProgress(`Uploading ${file.name}… ${i + 1}/${totalChunks}`);
+      const blob = file.slice(i * CHUNK, Math.min(file.size, (i + 1) * CHUNK));
+      const chunkForm = new FormData();
+      chunkForm.set("mode", "chunk");
+      chunkForm.set("uploadId", uploadId);
+      chunkForm.set("chunkIndex", String(i));
+      chunkForm.set("chunk", blob, `chunk-${i}`);
+      const chunkRes = await fetch(`/api/projects/${project._id}/uploads`, {
+        method: "POST",
+        body: chunkForm,
+      });
+      const chunkData = (await chunkRes.json().catch(() => null)) as { error?: string } | null;
+      if (!chunkRes.ok) {
+        throw new Error(chunkData?.error || `Chunk upload failed (${chunkRes.status})`);
+      }
+    }
+
+    const finishForm = new FormData();
+    finishForm.set("mode", "finish");
+    finishForm.set("uploadId", uploadId);
+    const finishRes = await fetch(`/api/projects/${project._id}/uploads`, {
+      method: "POST",
+      body: finishForm,
+    });
+    const finishData = (await finishRes.json().catch(() => null)) as
+      | { upload?: { id?: string }; error?: string }
+      | null;
+    if (!finishRes.ok || !finishData?.upload?.id) {
+      throw new Error(finishData?.error || `Could not finish upload (${finishRes.status})`);
+    }
+    return finishData.upload.id;
+  }
+
   async function send(event?: FormEvent) {
     event?.preventDefault();
     const text = input.trim();
@@ -368,12 +442,25 @@ export function ProjectChat({
     setBusy(true);
     setStatus(pending.length ? "Uploading your file…" : "Working on it…");
 
-    const form = new FormData();
-    form.set("message", text);
-    if (activeChatId) form.set("chatId", activeChatId);
-    for (const item of pending) form.append("files", item.file);
-
     try {
+      const uploadIds: string[] = [];
+      for (const [index, item] of pending.entries()) {
+        const id = await uploadPendingFile(item.file, (label) => {
+          setStatus(
+            pending.length === 1
+              ? label
+              : `File ${index + 1}/${pending.length}: ${label}`,
+          );
+        });
+        uploadIds.push(id);
+      }
+
+      setStatus(pending.length ? "Reading your file…" : "Working on it…");
+      const form = new FormData();
+      form.set("message", text);
+      if (activeChatId) form.set("chatId", activeChatId);
+      if (uploadIds.length) form.set("uploadIds", JSON.stringify(uploadIds));
+
       const res = await fetch(`/api/projects/${project._id}/chat`, {
         method: "POST",
         body: form,
@@ -381,11 +468,9 @@ export function ProjectChat({
       const contentType = res.headers.get("content-type") || "";
       if (!res.ok && !contentType.includes("text/event-stream")) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? "Chat failed");
-        setInput(text);
-        setFiles(pending);
-        setMessages((current) => current.filter((item) => item._id !== optimistic._id));
-        return;
+        throw new Error(
+          data?.error || `Chat failed${res.status ? ` (${res.status})` : ""}`,
+        );
       }
 
       let doneMessage: ChatMessageDTO | undefined;
@@ -408,11 +493,10 @@ export function ProjectChat({
       });
 
       if (streamError || !doneMessage) {
-        setError(streamError || "Chat failed");
-        setInput(text);
-        setFiles(pending);
-        setMessages((current) => current.filter((item) => item._id !== optimistic._id));
-        return;
+        throw new Error(
+          streamError ||
+            "Chat failed — the server closed the connection before finishing. For big Attio imports, try again; progress may still have applied.",
+        );
       }
 
       pending.forEach((item) => {
@@ -500,52 +584,33 @@ export function ProjectChat({
                 void refreshAutomations();
                 setAutomationsOpen(true);
               }}
-              className="rounded-full border border-line px-4 py-2 text-sm text-sea hover:border-sea"
+              className={`relative rounded-full border px-4 py-2 text-sm hover:border-sea ${
+                runningAutomations.length
+                  ? "border-sea/50 bg-sea/10 text-sea"
+                  : "border-line text-sea"
+              }`}
+              title={
+                runningAutomations.length
+                  ? `${runningAutomations.length} automation${runningAutomations.length === 1 ? "" : "s"} running — open to manage`
+                  : "Automations"
+              }
             >
               Automations
-              {runningAutomations.length ? ` · ${runningAutomations.length}` : ""}
+              {runningAutomations.length ? (
+                <span className="ml-2 inline-flex items-center gap-1.5 rounded-full bg-sea/20 px-2 py-0.5 text-[11px] font-medium leading-none text-sea">
+                  <span
+                    className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sea"
+                    aria-hidden
+                  />
+                  {runningAutomations.length} live
+                </span>
+              ) : automations.length ? (
+                <span className="ml-1 text-muted">· {automations.length}</span>
+              ) : null}
             </button>
           </div>
         </div>
       </header>
-
-      {runningAutomations.length ? (
-        <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-3 sm:px-6">
-          <div className="mx-auto flex max-w-4xl flex-col gap-2">
-            {runningAutomations.map((item) => (
-              <div
-                key={item._id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sea/40 bg-sea/10 px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <p className="flex items-center gap-2 text-sm font-medium text-paper">
-                    <span
-                      className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
-                      aria-hidden
-                    />
-                    Automatic update running
-                  </p>
-                  <p className="mt-1 truncate text-xs text-muted">
-                    {item.sourceProvider === "other"
-                      ? item.sourceIntegrationName || "custom API"
-                      : item.sourceProvider}{" "}
-                    · {item.campaignName} → Attio “{item.attioList}”
-                    {item.lastSummary ? ` · ${item.lastSummary}` : ""}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={stoppingId === item._id}
-                  onClick={() => void stopRunningAutomation(item)}
-                  className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
-                >
-                  {stoppingId === item._id ? "Stopping…" : "Stop"}
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
 
       <main className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col overflow-hidden px-4 sm:px-6">
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-8">

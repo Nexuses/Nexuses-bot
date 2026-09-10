@@ -6,6 +6,7 @@ import {
   toolFilePayload,
   type ExtractedFile,
 } from "@/lib/attachments";
+import { deleteChatUpload, loadChatUploadFile } from "@/lib/chat-uploads";
 import { ensureAutomationRunner } from "@/lib/automations";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
 import { HTML_DASHBOARD_PROMPT } from "@/lib/html-dashboard-kit";
@@ -31,7 +32,7 @@ import { Chat } from "@/models/Chat";
 import { Integration } from "@/models/Integration";
 import { Message } from "@/models/Message";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -114,7 +115,14 @@ function providerGuide(integrations: StoredIntegration[]) {
 async function readChatInput(request: Request) {
   const contentType = request.headers.get("content-type") || "";
   if (contentType.includes("multipart/form-data")) {
-    const form = await request.formData();
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      throw new Error(
+        "Could not read the upload. Large files should upload first — try again, or use a file under 32MB.",
+      );
+    }
     const text = String(form.get("message") ?? "").trim();
     const files = form
       .getAll("files")
@@ -123,12 +131,27 @@ async function readChatInput(request: Request) {
         const file = item as File;
         return typeof file.arrayBuffer === "function" && typeof file.name === "string" && file.size > 0;
       });
-    return { text, files, chatId: String(form.get("chatId") ?? "").trim() };
+    let uploadIds: string[] = [];
+    try {
+      const raw = String(form.get("uploadIds") ?? "").trim();
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          uploadIds = parsed.map((id) => String(id || "").trim()).filter(Boolean);
+        }
+      }
+    } catch {
+      throw new Error("Invalid uploadIds");
+    }
+    return { text, files, uploadIds, chatId: String(form.get("chatId") ?? "").trim() };
   }
   const body = await request.json().catch(() => null);
   return {
     text: String(body?.message ?? "").trim(),
     files: [] as File[],
+    uploadIds: Array.isArray(body?.uploadIds)
+      ? body.uploadIds.map((id: unknown) => String(id || "").trim()).filter(Boolean)
+      : ([] as string[]),
     chatId: String(body?.chatId ?? "").trim(),
   };
 }
@@ -140,16 +163,45 @@ export async function POST(request: Request, { params }: Params) {
 
   ensureAutomationRunner();
 
-  const { text, files, chatId: requestedChatId } = await readChatInput(request);
-  if (files.length > MAX_CHAT_FILES) return jsonError(`You can attach up to ${MAX_CHAT_FILES} files`);
-  if (!text && !files.length) return jsonError("Message or file is required");
+  let text = "";
+  let files: File[] = [];
+  let uploadIds: string[] = [];
+  let requestedChatId = "";
+  try {
+    const input = await readChatInput(request);
+    text = input.text;
+    files = input.files;
+    uploadIds = input.uploadIds;
+    requestedChatId = input.chatId;
+  } catch (err) {
+    return jsonError(err instanceof Error ? err.message : "Could not read request", 400);
+  }
+
+  if (files.length + uploadIds.length > MAX_CHAT_FILES) {
+    return jsonError(`You can attach up to ${MAX_CHAT_FILES} files`);
+  }
+  if (!text && !files.length && !uploadIds.length) return jsonError("Message or file is required");
   if (text.length > 8000) return jsonError("Message is too long");
 
   let extracted: ExtractedFile[] = [];
   try {
-    extracted = await Promise.all(files.map((file) => extractUploadedFile(file)));
+    const fromUploads = await Promise.all(
+      uploadIds.map(async (uploadId) => {
+        const { file } = await loadChatUploadFile({
+          userId: session.userId,
+          projectId: id,
+          uploadId,
+        });
+        return extractUploadedFile(file);
+      }),
+    );
+    const fromFiles = await Promise.all(files.map((file) => extractUploadedFile(file)));
+    extracted = [...fromUploads, ...fromFiles];
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : "Could not read a file");
+  } finally {
+    // Best-effort cleanup so disk does not fill with chat CSVs.
+    await Promise.all(uploadIds.map((uploadId) => deleteChatUpload(id, uploadId)));
   }
 
   const displayText =
@@ -275,7 +327,7 @@ Formatting (required):
 ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
-- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). Never import contacts one API call at a time.
+- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). For campaign CSVs with sent/opened/clicked/replied columns, omit stage so engagement maps to stages. Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once. Do not claim it is impossible. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.

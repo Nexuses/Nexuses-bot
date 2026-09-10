@@ -752,6 +752,44 @@ function buildCsvDashboardPayload(
   };
 }
 
+async function mapPool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(Math.max(concurrency, 1), items.length || 1) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+function engagementStageForRow(
+  row: Record<string, string>,
+  args: Record<string, unknown>,
+  fallbackStage: string,
+) {
+  const stageReply = String(args.stage_reply || args.stageReply || "hot").trim() || "hot";
+  const stageClick = String(args.stage_click || args.stageClick || "click").trim() || "click";
+  const stageOpen = String(args.stage_open || args.stageOpen || "open").trim() || "open";
+  const stageSent = String(args.stage_sent || args.stageSent || fallbackStage || "sent").trim() || "sent";
+  if (rowMatchesCsvFilter(row, "replied")) return stageReply;
+  if (rowMatchesCsvFilter(row, "clicked")) return stageClick;
+  if (rowMatchesCsvFilter(row, "opened")) return stageOpen;
+  if (rowMatchesCsvFilter(row, "sent")) return stageSent;
+  return fallbackStage || "prospect";
+}
+
+function csvLooksLikeEngagement(rows: Record<string, string>[]) {
+  const sample = rows[0] || {};
+  const keys = Object.keys(sample).join(" ");
+  return /opened|clicked|replied|sent time|open count|click count/i.test(keys);
+}
+
 async function attioImportToList(
   apiKey: string,
   args: Record<string, unknown>,
@@ -764,7 +802,7 @@ async function attioImportToList(
   const csvText =
     String(args.csv || args.data || "").trim() ||
     files.find((file) => /\.csv$/i.test(file.name))?.text ||
-    files.find((file) => file.text.includes(","))?.text ||
+    files.find((file) => file.text.includes(",") && !file.text.startsWith("Large CSV"))?.text ||
     "";
   if (!csvText) throw new Error("No CSV data found. Attach a CSV or pass csv text.");
 
@@ -777,6 +815,12 @@ async function attioImportToList(
       `CSV has ${allRows.length.toLocaleString()} rows — importing first ${maxRows.toLocaleString()} now…`,
     );
   }
+
+  const mapEngagement =
+    String(args.map_engagement ?? args.mapEngagement ?? "").toLowerCase() === "true" ||
+    args.map_engagement === true ||
+    args.mapEngagement === true ||
+    (!stage && csvLooksLikeEngagement(rows));
 
   onStatus?.(`Looking up "${listName}" in Attio…`);
   const lists = (await requestJson(`${ATTIO}/v2/lists`, {
@@ -804,39 +848,56 @@ async function attioImportToList(
     (attributes.data || []).find((item) => item.type === "status");
   const stageSlug = statusAttr?.api_slug || "stage";
 
-  if (stage && statusAttr) {
-    try {
-      await requestJson(
-        `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
-        {
-          method: "POST",
-          headers: attioHeaders(apiKey),
-          body: JSON.stringify({ data: { title: stage } }),
-        },
-      );
-    } catch {
-      // Stage already exists.
+  const stagesNeeded = new Set<string>();
+  if (mapEngagement) {
+    for (const row of rows) stagesNeeded.add(engagementStageForRow(row, args, stage));
+  } else if (stage) {
+    stagesNeeded.add(stage);
+  }
+
+  if (statusAttr) {
+    for (const needed of stagesNeeded) {
+      if (!needed) continue;
+      try {
+        await requestJson(
+          `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
+          {
+            method: "POST",
+            headers: attioHeaders(apiKey),
+            body: JSON.stringify({ data: { title: needed } }),
+          },
+        );
+      } catch {
+        // Stage already exists.
+      }
     }
   }
 
   const added: string[] = [];
   const failed: string[] = [];
-  const stageNote = stage ? ` onto "${stage}"` : "";
+  let doneCount = 0;
+  const modeNote = mapEngagement ? " with stages from CSV engagement" : stage ? ` onto "${stage}"` : "";
   onStatus?.(
-    `Found the list. Importing ${rows.length} contact${rows.length === 1 ? "" : "s"}${stageNote}. This can take a little time…`,
+    `Found the list. Importing ${rows.length.toLocaleString()} contact${rows.length === 1 ? "" : "s"}${modeNote}…`,
   );
 
-  for (const [index, row] of rows.entries()) {
-    const n = index + 1;
-    if (n === 1 || n === rows.length || n % 5 === 0) {
-      onStatus?.(`Uploading contact ${n} of ${rows.length} to Attio…`);
-    }
-    const email = cell(row, ["email", "email address", "e-mail", "work email", "email_address"]);
+  await mapPool(rows, 8, async (row) => {
+    const email = cell(row, [
+      "email",
+      "email address",
+      "e-mail",
+      "work email",
+      "email_address",
+      "lead email",
+      "lead_email",
+    ]);
     const { first, last, full } = parseName(row);
     const label = full || email || "row";
+    const rowStage = mapEngagement ? engagementStageForRow(row, args, stage) : stage;
     if (!email || !email.includes("@")) {
       failed.push(`${label}: missing email`);
-      continue;
+      doneCount += 1;
+      return;
     }
     try {
       const person = await requestJson(
@@ -860,17 +921,16 @@ async function attioImportToList(
         {
           parent_record_id: recordId,
           parent_object: "people",
-          entry_values: stage ? { [stageSlug]: stage } : {},
+          entry_values: rowStage ? { [stageSlug]: rowStage } : {},
         },
         {
           parent_record_id: recordId,
           parent_object: "people",
-          entry_values: stage ? { [stageSlug]: [{ status: stage }] } : {},
+          entry_values: rowStage ? { [stageSlug]: [{ status: rowStage }] } : {},
         },
         { parent_record_id: recordId, parent_object: "people", entry_values: {} },
       ];
       let listed = false;
-      let lastError = "";
       for (const data of payloads) {
         try {
           await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
@@ -880,8 +940,8 @@ async function attioImportToList(
           });
           listed = true;
           break;
-        } catch (err) {
-          lastError = err instanceof Error ? err.message : "failed";
+        } catch {
+          // try next payload shape
         }
       }
       if (!listed) {
@@ -894,13 +954,19 @@ async function attioImportToList(
       added.push(full || email);
     } catch (err) {
       failed.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
+    } finally {
+      doneCount += 1;
+      if (doneCount === 1 || doneCount === rows.length || doneCount % 25 === 0) {
+        onStatus?.(`Uploading contacts to Attio… ${doneCount} / ${rows.length}`);
+      }
     }
-  }
+  });
 
   return clip({
     ok: failed.length === 0,
     list: list.name,
-    stage: stage || null,
+    stage: mapEngagement ? "from CSV engagement" : stage || null,
+    mapEngagement,
     imported: added.length,
     skipped: failed.length,
     totalInFile: allRows.length,
@@ -1376,12 +1442,21 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from an attached CSV (full file is available to this tool) into an existing Attio list, optionally onto a stage. Use ONCE when the user uploads a CSV for Attio. Do not call attio_api once per row. Do not ask the user to paste the CSV. Defaults to first 2000 rows (max 5000 via limit).",
+            "Import people from an attached CSV (full file is available to this tool) into an existing Attio list. Use ONCE for CSV→Attio. For SmartLead/campaign CSVs with Sent/Opened/Clicked/Replied columns, omit stage (or set map_engagement true) so each row gets the right stage automatically. Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
           parameters: {
             type: "object",
             properties: {
-              list: { type: "string", description: "Attio list name, e.g. Nexuses bot" },
-              stage: { type: "string", description: "Pipeline stage, e.g. prospect" },
+              list: { type: "string", description: "Attio list name, e.g. HR campaign" },
+              stage: {
+                type: "string",
+                description:
+                  "Optional single stage for all rows. Omit on engagement CSVs so stages are mapped from sent/open/click/reply.",
+              },
+              map_engagement: {
+                type: "boolean",
+                description:
+                  "Map CSV engagement to stages (replied→hot, clicked→click, opened→open, sent→sent). Auto-on for campaign CSVs when stage is omitted.",
+              },
               csv: {
                 type: "string",
                 description: "CSV text including header row. Omit if a CSV file is already attached.",

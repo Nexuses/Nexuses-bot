@@ -38,6 +38,9 @@ yarn-error.log*
 /public/uploads/*
 !/public/uploads/.gitkeep
 
+# chat file uploads (CSV etc.)
+/.data/
+
 # vercel
 .vercel
 
