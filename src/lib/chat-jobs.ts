@@ -355,14 +355,22 @@ async function runBrevoToAttioJob(job: {
   const stageLines = Object.entries(result.byStage || {})
     .map(([stage, count]) => `- **${stage}:** ${Number(count).toLocaleString()}`)
     .join("\n");
+  const skippedCampaigns = Array.isArray(result.campaignErrors)
+    ? result.campaignErrors
+    : [];
   const content = [
     `**Brevo → Attio finished** — **${result.imported.toLocaleString()}** unique contacts in **${result.list}**.`,
     stageLines,
     result.rawRecipientSum
       ? `Raw Brevo recipient sum across campaigns: ${result.rawRecipientSum.toLocaleString()} (overlap deduped in Attio).`
       : "",
-    result.skipped ? `${result.skipped.toLocaleString()} skipped with errors.` : "",
-    result.errors?.length ? `Sample errors: ${result.errors.slice(0, 3).join("; ")}` : "",
+    skippedCampaigns.length
+      ? `Skipped campaigns (${skippedCampaigns.length}): ${skippedCampaigns.slice(0, 5).join(" | ")}`
+      : "",
+    result.skipped ? `${result.skipped.toLocaleString()} contacts skipped with errors.` : "",
+    result.errors?.length && !skippedCampaigns.length
+      ? `Sample errors: ${result.errors.slice(0, 3).join("; ")}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");

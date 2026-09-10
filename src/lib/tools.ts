@@ -1472,7 +1472,8 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               campaigns: {
                 type: "array",
                 items: { type: "string" },
-                description: "Exact Brevo campaign names (or ids)",
+                description:
+                  "Brevo campaign names and/or numeric ids. Prefer ids when known (e.g. \"175\" or \"Name #175\"). Truncated UI names are ok — server fuzzy-matches.",
               },
               attio_list: {
                 type: "string",

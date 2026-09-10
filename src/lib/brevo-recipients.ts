@@ -198,48 +198,118 @@ function extractStatus(data: unknown): string {
   return "";
 }
 
+function normalizeCampaignName(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/\u2026/g, " ")
+    .replace(/\.{2,}/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractCampaignIdHint(query: string) {
+  const trimmed = query.trim();
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  const hash = trimmed.match(/#\s*(\d+)\s*$/);
+  if (hash) return hash[1];
+  const trailing = trimmed.match(/\b(?:id|campaign)\s*[:=]?\s*(\d+)\s*$/i);
+  if (trailing) return trailing[1];
+  return "";
+}
+
+function scoreCampaignName(query: string, name: string) {
+  const q = normalizeCampaignName(query.replace(/#\s*\d+\s*$/, ""));
+  const n = normalizeCampaignName(name);
+  if (!q || !n) return 0;
+  if (q === n) return 10_000;
+  if (n.includes(q) || q.includes(n)) return 8_000 + Math.min(q.length, n.length);
+  const qTokens = q.split(" ").filter((t) => t.length > 1);
+  if (!qTokens.length) return 0;
+  const nTokens = n.split(" ");
+  let hits = 0;
+  for (const token of qTokens) {
+    if (nTokens.some((nt) => nt === token || nt.includes(token) || token.includes(nt))) {
+      hits += 1;
+    }
+  }
+  const coverage = hits / qTokens.length;
+  if (coverage < 0.55) return 0;
+  return Math.round(coverage * 1000) + hits * 25;
+}
+
+async function listAllBrevoCampaignsRest(restKey: string) {
+  const all: Array<{ id: string; name: string }> = [];
+  let offset = 0;
+  const limit = 50;
+  for (let page = 0; page < 40; page += 1) {
+    const data = (await requestJson(
+      `${BREVO}/v3/emailCampaigns?limit=${limit}&offset=${offset}&excludeHtmlContent=true`,
+      { headers: brevoHeaders(restKey) },
+    )) as { campaigns?: Array<Record<string, unknown>> };
+    const campaigns = data?.campaigns || [];
+    for (const c of campaigns) {
+      if (c?.id == null) continue;
+      all.push({ id: String(c.id), name: String(c.name || "") });
+    }
+    if (campaigns.length < limit) break;
+    offset += limit;
+  }
+  return all;
+}
+
 async function resolveCampaignId(
   restKey: string | undefined,
   mcpKey: string | undefined,
   campaignQuery: string,
 ) {
-  const q = campaignQuery.trim().toLowerCase();
+  const idHint = extractCampaignIdHint(campaignQuery);
+
+  if (idHint && restKey) {
+    try {
+      const data = (await requestJson(
+        `${BREVO}/v3/emailCampaigns/${encodeURIComponent(idHint)}`,
+        { headers: brevoHeaders(restKey) },
+      )) as { id?: number | string; name?: string };
+      if (data?.id != null) {
+        return { id: String(data.id), name: String(data.name || campaignQuery) };
+      }
+    } catch {
+      // fall through to name matching
+    }
+  }
+
   if (/^\d+$/.test(campaignQuery.trim())) {
     return { id: campaignQuery.trim(), name: campaignQuery.trim() };
   }
 
+  let best: { id: string; name: string; score: number } | null = null;
+
   if (restKey) {
-    let offset = 0;
-    const limit = 50;
-    for (let page = 0; page < 20; page += 1) {
-      const data = (await requestJson(
-        `${BREVO}/v3/emailCampaigns?limit=${limit}&offset=${offset}&excludeHtmlContent=true`,
-        { headers: brevoHeaders(restKey) },
-      )) as { campaigns?: Array<Record<string, unknown>>; count?: number };
-      const campaigns = data?.campaigns || [];
-      const exact = campaigns.find((c) => String(c.name || "").toLowerCase() === q);
-      const partial = campaigns.find((c) => String(c.name || "").toLowerCase().includes(q));
-      const match = exact || partial;
-      if (match?.id != null) {
-        return { id: String(match.id), name: String(match.name || campaignQuery) };
-      }
-      if (campaigns.length < limit) break;
-      offset += limit;
+    const campaigns = await listAllBrevoCampaignsRest(restKey);
+    for (const c of campaigns) {
+      const score = scoreCampaignName(campaignQuery, c.name);
+      if (!best || score > best.score) best = { ...c, score };
     }
   }
 
-  if (mcpKey) {
-    const listed = await listBrevoCampaignsViaMcp(mcpKey, { limit: 100 });
-    const match =
-      listed.campaigns.find((c) => String(c.name || "").toLowerCase() === q) ||
-      listed.campaigns.find((c) => String(c.name || "").toLowerCase().includes(q));
-    if (match?.id != null && String(match.id)) {
-      return { id: String(match.id), name: String(match.name || campaignQuery) };
+  if ((!best || best.score < 500) && mcpKey) {
+    const listed = await listBrevoCampaignsViaMcp(mcpKey, { limit: 200 });
+    for (const c of listed.campaigns) {
+      if (c?.id == null) continue;
+      const score = scoreCampaignName(campaignQuery, String(c.name || ""));
+      if (!best || score > best.score) {
+        best = { id: String(c.id), name: String(c.name || campaignQuery), score };
+      }
     }
+  }
+
+  if (best && best.score >= 500) {
+    return { id: best.id, name: best.name };
   }
 
   throw new Error(
-    `Brevo campaign "${campaignQuery}" not found. List campaigns first, then use the exact name.`,
+    `Brevo campaign "${campaignQuery}" not found. Use the exact name or campaign id (e.g. 175).`,
   );
 }
 

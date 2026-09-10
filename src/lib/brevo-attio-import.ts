@@ -221,7 +221,9 @@ export async function importBrevoCampaignsToAttio(input: {
     all: number;
     opens: number;
     clicks: number;
+    error?: string;
   }> = [];
+  const campaignErrors: string[] = [];
 
   for (const [index, campaign] of campaigns.entries()) {
     if (input.shouldCancel?.()) throw new Error("Stopped by user");
@@ -229,66 +231,89 @@ export async function importBrevoCampaignsToAttio(input: {
       `Exporting Brevo campaign ${index + 1}/${campaigns.length}: ${campaign}…`,
     );
 
-    // Sequential exports per campaign (Brevo rate limits / process queue)
-    const clicks = await exportBrevoCampaignRecipientsFull({
-      apiKey: input.brevoApiKey,
-      restApiKey: input.brevoRestApiKey,
-      mcpUrl: input.brevoMcpUrl,
-      campaign,
-      event: "clicks",
-      onStatus: (t) => input.onStatus?.(`${campaign}: ${t}`),
-    });
-    const opens = await exportBrevoCampaignRecipientsFull({
-      apiKey: input.brevoApiKey,
-      restApiKey: input.brevoRestApiKey,
-      mcpUrl: input.brevoMcpUrl,
-      campaign,
-      event: "opens",
-      onStatus: (t) => input.onStatus?.(`${campaign}: ${t}`),
-    });
-    const all = await exportBrevoCampaignRecipientsFull({
-      apiKey: input.brevoApiKey,
-      restApiKey: input.brevoRestApiKey,
-      mcpUrl: input.brevoMcpUrl,
-      campaign,
-      event: "all",
-      onStatus: (t) => input.onStatus?.(`${campaign}: ${t}`),
-    });
+    try {
+      // Sequential exports per campaign (Brevo rate limits / process queue)
+      const clicks = await exportBrevoCampaignRecipientsFull({
+        apiKey: input.brevoApiKey,
+        restApiKey: input.brevoRestApiKey,
+        mcpUrl: input.brevoMcpUrl,
+        campaign,
+        event: "clicks",
+        onStatus: (t) => input.onStatus?.(`${campaign}: ${t}`),
+      });
+      const opens = await exportBrevoCampaignRecipientsFull({
+        apiKey: input.brevoApiKey,
+        restApiKey: input.brevoRestApiKey,
+        mcpUrl: input.brevoMcpUrl,
+        campaign,
+        event: "opens",
+        onStatus: (t) => input.onStatus?.(`${campaign}: ${t}`),
+      });
+      const all = await exportBrevoCampaignRecipientsFull({
+        apiKey: input.brevoApiKey,
+        restApiKey: input.brevoRestApiKey,
+        mcpUrl: input.brevoMcpUrl,
+        campaign,
+        event: "all",
+        onStatus: (t) => input.onStatus?.(`${campaign}: ${t}`),
+      });
 
-    perCampaign.push({
-      campaign: all.campaignName || campaign,
-      all: all.people.length,
-      opens: opens.people.length,
-      clicks: clicks.people.length,
-    });
+      perCampaign.push({
+        campaign: all.campaignName || campaign,
+        all: all.people.length,
+        opens: opens.people.length,
+        clicks: clicks.people.length,
+      });
 
-    const apply = (
-      people: Array<{ email: string; name: string }>,
-      stage: string,
-      campaignName: string,
-    ) => {
-      for (const person of people) {
-        const email = person.email.toLowerCase();
-        const existing = merged.get(email);
-        if (!existing) {
-          merged.set(email, {
-            email,
-            name: person.name,
-            stage,
-            campaigns: [campaignName],
-          });
-          continue;
+      const apply = (
+        people: Array<{ email: string; name: string }>,
+        stage: string,
+        campaignName: string,
+      ) => {
+        for (const person of people) {
+          const email = person.email.toLowerCase();
+          const existing = merged.get(email);
+          if (!existing) {
+            merged.set(email, {
+              email,
+              name: person.name,
+              stage,
+              campaigns: [campaignName],
+            });
+            continue;
+          }
+          existing.stage = pickHigherStage(existing.stage, stage, stageOrder);
+          if (person.name && !existing.name) existing.name = person.name;
+          if (!existing.campaigns.includes(campaignName)) existing.campaigns.push(campaignName);
         }
-        existing.stage = pickHigherStage(existing.stage, stage, stageOrder);
-        if (person.name && !existing.name) existing.name = person.name;
-        if (!existing.campaigns.includes(campaignName)) existing.campaigns.push(campaignName);
-      }
-    };
+      };
 
-    const campaignName = all.campaignName || campaign;
-    apply(all.people, stageProspect, campaignName);
-    apply(opens.people, stageOpen, campaignName);
-    apply(clicks.people, stageClick, campaignName);
+      const campaignName = all.campaignName || campaign;
+      apply(all.people, stageProspect, campaignName);
+      apply(opens.people, stageOpen, campaignName);
+      apply(clicks.people, stageClick, campaignName);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "export failed";
+      campaignErrors.push(`${campaign}: ${message}`);
+      perCampaign.push({
+        campaign,
+        all: 0,
+        opens: 0,
+        clicks: 0,
+        error: message,
+      });
+      await input.onStatus?.(
+        `Skipped campaign ${index + 1}/${campaigns.length} (${message}). Continuing…`,
+      );
+    }
+  }
+
+  if (!merged.size) {
+    throw new Error(
+      campaignErrors.length
+        ? `No recipients imported. Campaign errors: ${campaignErrors.slice(0, 5).join(" | ")}`
+        : "No recipients found across the given Brevo campaigns.",
+    );
   }
 
   const people = [...merged.values()];
@@ -339,7 +364,7 @@ export async function importBrevoCampaignsToAttio(input: {
   const rawSum = perCampaign.reduce((sum, row) => sum + row.all, 0);
 
   return {
-    ok: failed.length === 0,
+    ok: failed.length === 0 && campaignErrors.length === 0,
     list: list.name,
     imported: added.length,
     skipped: failed.length,
@@ -347,8 +372,9 @@ export async function importBrevoCampaignsToAttio(input: {
     rawRecipientSum: rawSum,
     byStage,
     perCampaign,
-    errors: failed.slice(0, 20),
+    campaignErrors,
+    errors: [...campaignErrors, ...failed].slice(0, 20),
     note:
-      "Imported from full Brevo recipient exports (all + opens + clicks), deduped by email with highest stage kept (Click > Open > Prospect).",
+      "Imported from full Brevo recipient exports (all + opens + clicks), deduped by email with highest stage kept. Campaigns that could not be resolved were skipped.",
   };
 }
