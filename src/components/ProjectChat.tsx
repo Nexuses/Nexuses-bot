@@ -206,21 +206,31 @@ export function ProjectChat({
 
   async function refreshChatJobs() {
     try {
-      const qs = activeChatId ? `?chatId=${activeChatId}&active=0` : "?active=0";
-      const res = await fetch(`/api/projects/${project._id}/chat-jobs${qs}`);
+      // Always poll active jobs project-wide so the strip stays visible across chats.
+      const res = await fetch(`/api/projects/${project._id}/chat-jobs?active=1`);
       const data = await res.json();
       if (!res.ok || !Array.isArray(data.jobs)) return;
       const jobs = data.jobs as ChatJobDTO[];
       setChatJobs(jobs.filter((job) => job.status === "queued" || job.status === "running"));
 
-      for (const job of jobs) {
+      // Also check recent finished jobs for this chat so completion messages appear.
+      const histQs = activeChatId
+        ? `?chatId=${activeChatId}&active=0`
+        : "?active=0";
+      const histRes = await fetch(`/api/projects/${project._id}/chat-jobs${histQs}`);
+      const histData = await histRes.json().catch(() => null);
+      const histJobs = Array.isArray(histData?.jobs) ? (histData.jobs as ChatJobDTO[]) : [];
+
+      for (const job of histJobs) {
         const seen = knownJobIds.current.has(job._id);
-        if (!seen) knownJobIds.current.add(job._id);
+        if (!seen && (job.status === "queued" || job.status === "running")) {
+          knownJobIds.current.add(job._id);
+        }
         if (
           seen &&
-          (job.status === "completed" || job.status === "failed") &&
+          (job.status === "completed" || job.status === "failed" || job.status === "stopped") &&
           job.chatId &&
-          job.chatId === activeChatId
+          (!activeChatId || job.chatId === activeChatId)
         ) {
           const msgRes = await fetch(
             `/api/projects/${project._id}/messages?chatId=${job.chatId}`,
@@ -255,11 +265,8 @@ export function ProjectChat({
   }, [busy, project._id]);
 
   const runningAutomations = automations.filter((item) => item.status === "running");
-  const activeJobs = chatJobs.filter(
-    (job) =>
-      (job.status === "queued" || job.status === "running") &&
-      (!activeChatId || job.chatId === activeChatId),
-  );
+  // Show strip for any live job in this chat, or project-wide if chat not selected yet.
+  const activeJobs = chatJobs.filter((job) => job.status === "queued" || job.status === "running");
 
   async function stopRunningAutomation(item: AutomationDTO) {
     setStoppingId(item._id);
@@ -275,6 +282,23 @@ export function ProjectChat({
       await refreshAutomations();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not stop automation");
+    } finally {
+      setStoppingId("");
+    }
+  }
+
+  async function stopActiveChatJob(jobId: string) {
+    setStoppingId(jobId);
+    setError("");
+    try {
+      await fetch(`/api/projects/${project._id}/chat-jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", chatId: activeChatId || undefined }),
+      });
+      await refreshChatJobs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not stop task");
     } finally {
       setStoppingId("");
     }
@@ -810,17 +834,72 @@ export function ProjectChat({
         </div>
       </header>
 
-      {activeJobs.length ? (
-        <div className="shrink-0 border-b border-line bg-panel/60 px-4 py-2 text-xs text-muted sm:px-6">
-          <div className="mx-auto flex max-w-4xl items-center gap-2">
-            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sea" aria-hidden />
-            <span className="truncate text-sea">
-              {activeJobs[0].lastSummary || activeJobs[0].title}
-              {activeJobs[0].progressTotal
-                ? ` · ${activeJobs[0].progressDone}/${activeJobs[0].progressTotal}`
-                : ""}
-            </span>
-            <span className="shrink-0 text-muted">keeps running until done</span>
+      {runningAutomations.length || activeJobs.length ? (
+        <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-3 sm:px-6">
+          <div className="mx-auto flex max-w-4xl flex-col gap-2">
+            {runningAutomations.map((item) => (
+              <div
+                key={item._id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sea/40 bg-sea/10 px-4 py-3"
+              >
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2 text-sm font-medium text-paper">
+                    <span
+                      className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
+                      aria-hidden
+                    />
+                    Automatic update running
+                  </p>
+                  <p className="mt-1 truncate text-xs text-muted">
+                    {item.sourceProvider === "other"
+                      ? item.sourceIntegrationName || "custom API"
+                      : item.sourceProvider}{" "}
+                    · {item.campaignName} → Attio “{item.attioList}”
+                    {item.lastSummary ? ` · ${item.lastSummary}` : ""}
+                    {" · "}keeps running until complete
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={stoppingId === item._id}
+                  onClick={() => void stopRunningAutomation(item)}
+                  className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
+                >
+                  {stoppingId === item._id ? "Stopping…" : "Stop"}
+                </button>
+              </div>
+            ))}
+            {activeJobs.map((job) => (
+              <div
+                key={job._id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sea/40 bg-sea/10 px-4 py-3"
+              >
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2 text-sm font-medium text-paper">
+                    <span
+                      className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
+                      aria-hidden
+                    />
+                    Background task running
+                  </p>
+                  <p className="mt-1 truncate text-xs text-muted">
+                    {job.lastSummary || job.title}
+                    {job.progressTotal
+                      ? ` · ${job.progressDone.toLocaleString()}/${job.progressTotal.toLocaleString()}`
+                      : ""}
+                    {" · "}keeps running until complete
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={stoppingId === job._id}
+                  onClick={() => void stopActiveChatJob(job._id)}
+                  className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
+                >
+                  {stoppingId === job._id ? "Stopping…" : "Stop"}
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       ) : null}
