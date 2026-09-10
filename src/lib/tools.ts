@@ -801,10 +801,10 @@ async function attioImportToList(
   if (!listName) throw new Error("List name is required");
   const csvText =
     String(args.csv || args.data || "").trim() ||
-    files.find((file) => /\.csv$/i.test(file.name))?.text ||
+    files.find((file) => /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name))?.text ||
     files.find((file) => file.text.includes(",") && !file.text.startsWith("Large CSV"))?.text ||
     "";
-  if (!csvText) throw new Error("No CSV data found. Attach a CSV or pass csv text.");
+  if (!csvText) throw new Error("No spreadsheet data found. Attach a CSV or Excel (.xlsx/.xls) file.");
 
   const { parseCsv, runAttioCsvImportFromText, ATTIO_IMPORT_BACKGROUND_MIN_ROWS } = await import(
     "@/lib/attio-import"
@@ -1133,7 +1133,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "share_csv_dashboard",
         description:
-          "BEST for large attached CSVs (campaign reports, lead exports, multi‑MB files). Reads the FULL attached CSV on the server — do NOT pass row data or paste CSV. Builds KPIs + branded HTML table. Use filter opened|clicked|replied|sent when the user asks who opened/clicked/etc. Prefer this over share_data_dashboard when a CSV file is attached.",
+          "BEST for large attached CSV/Excel campaign reports. Reads the FULL attached spreadsheet on the server — do NOT pass row data or paste CSV. Builds KPIs + branded HTML table. Use filter opened|clicked|replied|sent when the user asks who opened/clicked/etc. Prefer this over share_data_dashboard when a CSV/Excel file is attached.",
         parameters: {
           type: "object",
           properties: {
@@ -1321,7 +1321,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from an attached CSV into an Attio list. Larger imports run in the BACKGROUND and keep going until finished even if chat disconnects — a result message is posted when done. Use ONCE for CSV→Attio. For campaign CSVs with Sent/Opened/Clicked/Replied, omit stage (or map_engagement true). Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
+            "Import people from an attached CSV or Excel (.xlsx/.xls) into an Attio list. Larger imports run in the BACKGROUND and keep going until finished even if chat disconnects — a result message is posted when done. Use ONCE for spreadsheet→Attio. For campaign reports with Sent/Opened/Clicked sections, omit stage (or map_engagement true). Do not call attio_api per row. Defaults to first 2000 rows (max 5000).",
           parameters: {
             type: "object",
             properties: {
@@ -2003,17 +2003,22 @@ export async function runTool(
       (fileName
         ? files.find((file) => file.name.toLowerCase() === fileName)?.text
         : undefined) ||
-      files.find((file) => /\.csv$/i.test(file.name))?.text ||
-      files.find((file) => file.text.includes(",") && !file.text.startsWith("Large CSV"))?.text ||
+      files.find((file) => /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name))?.text ||
+      files.find(
+        (file) =>
+          file.text.includes(",") &&
+          !file.text.startsWith("Large CSV") &&
+          !file.text.startsWith("Large Excel"),
+      )?.text ||
       "";
     if (!csvText) {
       throw new Error(
-        "No attached CSV found. Ask the user to attach the CSV file, then call share_csv_dashboard again (do not invent rows).",
+        "No attached spreadsheet found. Ask the user to attach a CSV or Excel (.xlsx/.xls) file, then call share_csv_dashboard again (do not invent rows).",
       );
     }
-    context.onStatus?.("Parsing the CSV…");
+    context.onStatus?.("Parsing the spreadsheet…");
     const parsed = parseCsv(csvText);
-    if (!parsed.length) throw new Error("CSV has no data rows.");
+    if (!parsed.length) throw new Error("Spreadsheet has no data rows.");
     const filter = String(args.filter || "all").trim() || "all";
     const limit = Math.min(Math.max(Number(args.limit) || 400, 1), 1000);
     context.onStatus?.(`Building dashboard from ${parsed.length.toLocaleString()} rows…`);

@@ -42,7 +42,7 @@ function pickAttioId(data: unknown, keys: string[]) {
   return record?.data?.api_slug || "";
 }
 
-export function parseCsv(text: string) {
+function splitCsvTable(text: string) {
   const input = text.replace(/^\uFEFF/, "");
   const table: string[][] = [];
   let row: string[] = [];
@@ -91,16 +91,49 @@ export function parseCsv(text: string) {
   }
   pushCell();
   pushRow();
+  return table;
+}
 
-  if (table.length < 2) return [] as Record<string, string>[];
-  const headers = table[0].map((header) => header.trim().toLowerCase());
-  return table.slice(1).map((cols) => {
-    const record: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      if (header) record[header] = (cols[index] || "").trim().replace(/^"|"$/g, "");
-    });
-    return record;
-  });
+function isEmailHeaderRow(cols: string[]) {
+  const labels = cols.map((c) => c.trim().toLowerCase()).filter(Boolean);
+  if (labels.length < 2) return false;
+  return labels.some(
+    (h) =>
+      h === "email" ||
+      h === "email address" ||
+      h === "e-mail" ||
+      h === "email_address" ||
+      h === "work email" ||
+      h === "lead email",
+  );
+}
+
+function engagementSectionFromRow(cols: string[]) {
+  if (isEmailHeaderRow(cols)) return "";
+  const text = cols.join(" ").trim().toLowerCase();
+  if (!text) return "";
+  // Order matters: "opens only … no click" must not match the clicker rule.
+  if (/opens?\s*only|opened email.*no click|no click/i.test(text)) return "opened";
+  if (/clicker|clicked a link|opened\s*&\s*clicked/i.test(text)) return "clicked";
+  if (/^sent\b|all emails delivered|emails delivered/i.test(text)) return "sent";
+  return "";
+}
+
+function applySectionEngagement(record: Record<string, string>, section: string) {
+  if (section === "clicked") {
+    record.clicked = record.clicked || "1";
+    record.opened = record.opened || "1";
+    record.sent = record.sent || "1";
+    record["click count"] = record["click count"] || "1";
+    record["open count"] = record["open count"] || "1";
+  } else if (section === "opened") {
+    record.opened = record.opened || "1";
+    record.sent = record.sent || "1";
+    record["open count"] = record["open count"] || "1";
+  } else if (section === "sent") {
+    record.sent = record.sent || "1";
+  }
+  if (section) record._section = section;
 }
 
 function cell(row: Record<string, string>, keys: string[]) {
@@ -114,8 +147,119 @@ function cell(row: Record<string, string>, keys: string[]) {
   return "";
 }
 
+function emailFromRecord(row: Record<string, string>) {
+  return cell(row, [
+    "email",
+    "email address",
+    "e-mail",
+    "work email",
+    "email_address",
+    "lead email",
+    "lead_email",
+  ])
+    .trim()
+    .toLowerCase();
+}
+
+const ENGAGEMENT_RANK: Record<string, number> = {
+  clicked: 3,
+  opened: 2,
+  sent: 1,
+};
+
+function sectionRank(row: Record<string, string>) {
+  const section = String(row._section || "").toLowerCase();
+  if (section && ENGAGEMENT_RANK[section]) return ENGAGEMENT_RANK[section];
+  if (rowMatchesCsvFilter(row, "clicked")) return 3;
+  if (rowMatchesCsvFilter(row, "opened")) return 2;
+  if (rowMatchesCsvFilter(row, "sent")) return 1;
+  return 0;
+}
+
+/** Keep highest engagement when the same email appears in Sent + Opens + Clicks sections. */
+function dedupeEngagementRows(rows: Record<string, string>[]) {
+  const byEmail = new Map<string, Record<string, string>>();
+  const withoutEmail: Record<string, string>[] = [];
+  for (const row of rows) {
+    const email = emailFromRecord(row);
+    if (!email || !email.includes("@")) {
+      withoutEmail.push(row);
+      continue;
+    }
+    const existing = byEmail.get(email);
+    if (!existing || sectionRank(row) > sectionRank(existing)) {
+      byEmail.set(email, { ...row });
+    } else if (existing && sectionRank(row) === sectionRank(existing)) {
+      // Fill blank fields from the duplicate row.
+      for (const [key, value] of Object.entries(row)) {
+        if (value && !existing[key]) existing[key] = value;
+      }
+    }
+  }
+  return [...byEmail.values(), ...withoutEmail];
+}
+
+export function parseCsv(text: string) {
+  const table = splitCsvTable(text);
+  if (!table.length) return [] as Record<string, string>[];
+
+  let headers: string[] | null = null;
+  let section = "";
+  const rows: Record<string, string>[] = [];
+
+  for (const cols of table) {
+    const sectionHit = engagementSectionFromRow(cols);
+    if (sectionHit) {
+      section = sectionHit;
+      continue;
+    }
+    if (isEmailHeaderRow(cols)) {
+      headers = cols.map((header) => header.trim().toLowerCase());
+      continue;
+    }
+    if (!headers) continue;
+
+    const record: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      if (header) record[header] = (cols[index] || "").trim().replace(/^"|"$/g, "");
+    });
+    // Skip banner/summary leftovers that somehow share the header shape.
+    const email = emailFromRecord(record);
+    if (!email.includes("@") && !cell(record, ["person name", "name", "full name"])) continue;
+
+    applySectionEngagement(record, section);
+    rows.push(record);
+  }
+
+  // Classic flat CSV: first row is the header when no email header was found mid-file.
+  if (!rows.length && table.length >= 2 && !headers) {
+    const fallbackHeaders = table[0].map((header) => header.trim().toLowerCase());
+    if (isEmailHeaderRow(table[0]) || fallbackHeaders.some((h) => h.includes("email"))) {
+      for (const cols of table.slice(1)) {
+        const record: Record<string, string> = {};
+        fallbackHeaders.forEach((header, index) => {
+          if (header) record[header] = (cols[index] || "").trim().replace(/^"|"$/g, "");
+        });
+        rows.push(record);
+      }
+    }
+  }
+
+  const hasSections = rows.some((row) => Boolean(row._section));
+  return hasSections ? dedupeEngagementRows(rows) : rows;
+}
+
 function parseName(row: Record<string, string>) {
-  const full = cell(row, ["name", "full name", "full_name", "contact", "lead name", "lead_name"]);
+  const full = cell(row, [
+    "person name",
+    "name",
+    "full name",
+    "full_name",
+    "contact",
+    "lead name",
+    "lead_name",
+    "contact name",
+  ]);
   let first = cell(row, ["first name", "first_name", "firstname", "first"]);
   let last = cell(row, ["last name", "last_name", "lastname", "last", "surname"]);
   if (!first && full) {
@@ -183,7 +327,8 @@ function engagementStageForRow(
 function csvLooksLikeEngagement(rows: Record<string, string>[]) {
   const sample = rows[0] || {};
   const keys = Object.keys(sample).join(" ");
-  return /opened|clicked|replied|sent time|open count|click count/i.test(keys);
+  if (sample._section) return true;
+  return /opened|clicked|replied|sent time|open count|click count|_section/i.test(keys);
 }
 
 async function mapPool<T>(

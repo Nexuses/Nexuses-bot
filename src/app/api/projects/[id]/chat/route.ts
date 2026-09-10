@@ -61,7 +61,7 @@ function providerGuide(integrations: StoredIntegration[]) {
   if (integrations.some((item) => item.provider === "attio")) {
     parts.push(`Attio is connected. Execute Attio work with tools.
 - Create a list/pipeline with stages: call attio_create_list with name and stages. Do this for requests like "create a list named X with stages A, B, C".
-- Import a CSV into a list/stage: call attio_import_to_list ONCE with the list name and stage. Do not loop attio_api for each row.
+- Import a CSV or Excel spreadsheet into a list/stage: call attio_import_to_list ONCE with the list name and stage. Do not loop attio_api for each row.
 - Inspect lists: attio_list_lists.
 - Search people/companies: attio_query_records.
 - Anything else: attio_api with method + path starting /v2/. Write bodies use {"data":{...}}.
@@ -327,15 +327,15 @@ Formatting (required):
 - When showing 2 or more items with the same fields, use a Markdown table with a header row — but keep chat tables small (roughly ≤20 rows); for bigger sets use a share link.
 - When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons — but for LARGE dashboards do not dump the full table in the fence; use tools instead.
 - For a live / public / shareable dashboard link: NEVER invent or guess a /p/... URL — fake links 404.
-- Attached CSV (any size, including multi‑MB campaign reports): call share_csv_dashboard with a title (and optional filter opened|clicked|replied|sent). The server reads the FULL file — do not pass rows/CSV text and do not ask the user to re-upload or paste. Then paste [Open report](url).
-- Campaign / lead tables when data is NOT from an attached CSV: call share_data_dashboard with title, kpis, columns, and rows JSON, then paste [Open report](url).
+- Attached CSV/Excel (any size, including multi‑MB campaign reports): call share_csv_dashboard with a title (and optional filter opened|clicked|replied|sent). The server reads the FULL file — do not pass rows/CSV text and do not ask the user to re-upload or paste. Then paste [Open report](url).
+- Campaign / lead tables when data is NOT from an attached spreadsheet: call share_data_dashboard with title, kpis, columns, and rows JSON, then paste [Open report](url).
 - Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste the returned url as [Open report](url).
 - Small HTML only: share_html with the full document is fine — also paste [Open report](url) from the tool result.
 ${HTML_DASHBOARD_PROMPT}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user asks who / what is on an Attio list or stage (Hot, Engage, Cold, Prospect, etc.), call attio_list_entries with the list from chat history. Answer with counts + names/emails. Do not ask what the stage means.
-- If the user uploads a CSV for Attio, call attio_import_to_list once (full file is available). Large imports run in the background until finished — tell the user that briefly; a follow-up message will appear in chat when done. For campaign CSVs with sent/opened/clicked/replied columns, omit stage so engagement maps to stages (or use the stages they named). Never import contacts one API call at a time.
+- If the user uploads a CSV or Excel file for Attio, call attio_import_to_list once (full file is available). Large imports run in the background until finished — tell the user that briefly; a follow-up message will appear in chat when done. For campaign reports with Sent / Opens / Clicks sections (or columns), omit stage so engagement maps to stages (or use the stages they named). Never import contacts one API call at a time.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once for a sample/count only — never claim that sample filled Attio. To import all recipients from one or more Brevo campaigns into an Attio list with stages, call brevo_import_campaigns_to_attio once and wait for the background result. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.

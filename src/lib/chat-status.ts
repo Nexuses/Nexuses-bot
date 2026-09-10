@@ -1,10 +1,10 @@
 export function openingStatus(message: string, fileNames: string[]) {
-  const csv = fileNames.some((name) => /\.csv$/i.test(name));
+  const sheet = fileNames.some((name) => /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(name));
   const image = fileNames.some((name) => /\.(png|jpe?g|webp|gif)$/i.test(name));
-  if (csv && /attio|list|stage|import|upload/i.test(message)) {
-    return "Reading your CSV for Attio…";
+  if (sheet && /attio|list|stage|import|upload/i.test(message)) {
+    return "Reading your spreadsheet for Attio…";
   }
-  if (csv) return "Reading your CSV…";
+  if (sheet) return "Reading your spreadsheet…";
   if (image) return "Looking at your image…";
   if (fileNames.length) return "Reading your file…";
   if (/public link|share link|share (this |the )?html|share (page|email)/i.test(message)) {

@@ -18,7 +18,7 @@ import type { ChatAttachment, ChatMessageDTO, ChatThreadDTO, IntegrationDTO } fr
 import type { ProjectDTO, SessionUser } from "@/types";
 
 const ACCEPT =
-  ".pdf,.txt,.md,.csv,.tsv,.json,.xml,.html,.htm,.log,.yml,.yaml,.png,.jpg,.jpeg,.webp,.gif";
+  ".pdf,.txt,.md,.csv,.tsv,.xlsx,.xls,.xlsm,.json,.xml,.html,.htm,.log,.yml,.yaml,.png,.jpg,.jpeg,.webp,.gif";
 const MAX_FILES = 5;
 const MAX_BYTES = 32 * 1024 * 1024;
 
@@ -907,7 +907,7 @@ export function ProjectChat({
               />
               <h1 className="font-display text-4xl tracking-tight">Ask Nexuses.</h1>
               <p className="mt-3 max-w-md text-muted">
-                Tell me what to do, or attach a CSV, PDF, text file, or screenshot. I will read it
+                Tell me what to do, or attach a CSV, Excel, PDF, text file, or screenshot. I will read it
                 and finish the task.
               </p>
               <div className="mt-6 flex flex-wrap justify-center gap-2">

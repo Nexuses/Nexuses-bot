@@ -1,4 +1,5 @@
 import type { ChatAttachment } from "@/types/chat";
+import { excelBufferToCsvText, isExcelFile } from "@/lib/excel";
 
 export const MAX_CHAT_FILES = 5;
 /** Raised so campaign report CSVs (multi‑MB) can upload. */
@@ -63,28 +64,31 @@ function isCsvLike(name: string, type: string) {
   return ext === "csv" || ext === "tsv" || type.includes("csv") || type.includes("tab-separated");
 }
 
+function isSpreadsheetLike(name: string, type: string) {
+  return isExcelFile(name, type) || isCsvLike(name, type);
+}
+
 /** Build a short LLM-facing summary so large CSVs do not blow the context window. */
 export function summarizeCsvForPrompt(raw: string, name: string, byteSize: number) {
   const cleaned = raw.replace(/\u0000/g, "");
   const lines = cleaned.split(/\r?\n/).filter((line) => line.length > 0);
-  const header = lines[0] || "(no header)";
+  const header = lines.find((line) => /email/i.test(line)) || lines[0] || "(no header)";
   const dataCount = Math.max(0, lines.length - 1);
-  const headSample = lines.slice(1, 16).join("\n");
-  const tailSample = dataCount > 20 ? lines.slice(-5).join("\n") : "";
+  const headSample = lines.slice(0, 20).join("\n");
   const sizeMb = (byteSize / (1024 * 1024)).toFixed(1);
+  const kind = isExcelFile(name) ? "Excel spreadsheet" : "CSV";
 
   const body = [
-    `Large CSV attached: "${name}" (${sizeMb} MB, ~${dataCount.toLocaleString()} data rows — row count is approximate if cells contain newlines).`,
-    `Columns: ${header}`,
+    `Large ${kind} attached: "${name}" (${sizeMb} MB, ~${dataCount.toLocaleString()} lines after conversion — approximate).`,
+    `Header/sample columns: ${header}`,
     "",
     "First rows (sample):",
     headSample || "(empty)",
     "",
-    tailSample ? `Last rows (sample):\n${tailSample}\n` : "",
-    "IMPORTANT: The full CSV is available to tools only (not pasted here).",
+    "IMPORTANT: The full spreadsheet/CSV is available to tools only (not pasted here).",
     "For dashboards/reports: call share_csv_dashboard (uses the full attached file).",
     "For Attio import: call attio_import_to_list once (uses the full attached file).",
-    "Do not ask the user to re-upload or paste the CSV. Do not invent rows.",
+    "Do not ask the user to re-upload or paste the file. Do not invent rows.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -98,6 +102,22 @@ async function extractPdf(bytes: Uint8Array) {
   const result = await extractText(pdf, { mergePages: true });
   const text = Array.isArray(result.text) ? result.text.join("\n\n") : result.text;
   return clip(text || "");
+}
+
+function asSpreadsheetPayload(raw: string, meta: ChatAttachment) {
+  const fullText =
+    raw.length > MAX_CSV_FULL_CHARS
+      ? `${raw.slice(0, MAX_CSV_FULL_CHARS)}\n…truncated for storage`
+      : raw;
+  const truncatedStorage = raw.length > MAX_CSV_FULL_CHARS;
+  const summary = summarizeCsvForPrompt(fullText, meta.name, meta.size);
+  return {
+    meta,
+    text: truncatedStorage
+      ? `${summary}\n\nNote: file exceeded ${Math.round(MAX_CSV_FULL_CHARS / (1024 * 1024))}MB text cap; tools see a truncated copy.`
+      : summary,
+    fullText,
+  } satisfies ExtractedFile;
 }
 
 export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
@@ -146,6 +166,23 @@ export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
     }
   }
 
+  if (isExcelFile(meta.name, meta.type)) {
+    try {
+      const csvText = await excelBufferToCsvText(bytes, meta.name);
+      if (!csvText.trim()) {
+        return { meta, text: `Excel file "${meta.name}" had no readable rows.` };
+      }
+      return asSpreadsheetPayload(csvText, {
+        ...meta,
+        type: "text/csv",
+      });
+    } catch (err) {
+      throw new Error(
+        `Could not read Excel ${meta.name}: ${err instanceof Error ? err.message : "failed"}`,
+      );
+    }
+  }
+
   const looksText =
     TEXT_EXT.has(ext) ||
     meta.type.startsWith("text/") ||
@@ -158,7 +195,7 @@ export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
   if (!looksText && hasNull) {
     return {
       meta,
-      text: `Binary file "${meta.name}" attached. Upload CSV, TXT, JSON, PDF, or an image so I can read the contents.`,
+      text: `Binary file "${meta.name}" attached. Upload CSV, Excel (.xlsx/.xls), TXT, JSON, PDF, or an image so I can read the contents.`,
     };
   }
 
@@ -167,20 +204,8 @@ export async function extractUploadedFile(file: File): Promise<ExtractedFile> {
     return { meta, text: `File "${meta.name}" was empty.` };
   }
 
-  if (isCsvLike(meta.name, meta.type)) {
-    const fullText =
-      raw.length > MAX_CSV_FULL_CHARS
-        ? `${raw.slice(0, MAX_CSV_FULL_CHARS)}\n…truncated for storage`
-        : raw;
-    const truncatedStorage = raw.length > MAX_CSV_FULL_CHARS;
-    const summary = summarizeCsvForPrompt(fullText, meta.name, meta.size);
-    return {
-      meta,
-      text: truncatedStorage
-        ? `${summary}\n\nNote: file exceeded ${Math.round(MAX_CSV_FULL_CHARS / (1024 * 1024))}MB text cap; tools see a truncated copy.`
-        : summary,
-      fullText,
-    };
+  if (isSpreadsheetLike(meta.name, meta.type)) {
+    return asSpreadsheetPayload(raw, meta);
   }
 
   return { meta, text: clip(raw, MAX_EXTRACTED_CHARS) };
