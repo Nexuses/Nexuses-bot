@@ -393,6 +393,8 @@ export type AttioImportResult = {
   imported: number;
   skipped: number;
   byStage: Record<string, number>;
+  fieldsWritten: string[];
+  fieldsCreated: string[];
   totalInFile: number;
   importedCap: number;
   truncated: boolean;
@@ -541,9 +543,33 @@ export async function runAttioCsvImportFromText(input: {
     }
   }
 
+  const { preparePersonFieldPlan, assertCompanyForRow, buildPersonValuesFromRow } = await import(
+    "@/lib/attio-person-fields"
+  );
+  const fieldPlan = await preparePersonFieldPlan(
+    input.apiKey,
+    requestJson,
+    rows,
+    (text) => input.onStatus?.(text, 0, rows.length),
+  );
+  if (fieldPlan.created.length) {
+    await input.onStatus?.(
+      `Created People attributes: ${fieldPlan.created.join(", ")}`,
+      0,
+      rows.length,
+    );
+  } else if (fieldPlan.used.length) {
+    await input.onStatus?.(
+      `Writing People fields: ${fieldPlan.used.slice(0, 12).join(", ")}${fieldPlan.used.length > 12 ? "…" : ""}`,
+      0,
+      rows.length,
+    );
+  }
+
   const added: string[] = [];
   const failed: string[] = [];
   const byStage: Record<string, number> = {};
+  const fieldsSeen = new Set<string>(["email_addresses", "name", ...fieldPlan.used]);
   let doneCount = 0;
   const modeNote = effectiveMapEngagement
     ? " with stages from CSV engagement"
@@ -551,7 +577,7 @@ export async function runAttioCsvImportFromText(input: {
       ? ` onto "${stage}"`
       : "";
   await input.onStatus?.(
-    `Found the list. Importing ${rows.length.toLocaleString()} contact${rows.length === 1 ? "" : "s"}${modeNote} (throttled for Attio)…`,
+    `Found the list. Importing ${rows.length.toLocaleString()} contact${rows.length === 1 ? "" : "s"}${modeNote} with full CSV fields (throttled for Attio)…`,
     0,
     rows.length,
   );
@@ -582,6 +608,19 @@ export async function runAttioCsvImportFromText(input: {
       return;
     }
     try {
+      const companyRecordId = await assertCompanyForRow(
+        input.apiKey,
+        requestJson,
+        row,
+        email,
+      );
+      const { values: extraValues, written } = buildPersonValuesFromRow(
+        row,
+        fieldPlan,
+        companyRecordId,
+      );
+      for (const slug of written) fieldsSeen.add(slug);
+
       const person = await requestJson(
         `${ATTIO}/v2/objects/people/records?matching_attribute=email_addresses`,
         {
@@ -591,7 +630,14 @@ export async function runAttioCsvImportFromText(input: {
             data: {
               values: {
                 email_addresses: [{ email_address: email }],
-                name: [{ first_name: first || full, last_name: last, full_name: full || email }],
+                name: [
+                  {
+                    first_name: first || full,
+                    last_name: last,
+                    full_name: full || email,
+                  },
+                ],
+                ...extraValues,
               },
             },
           }),
@@ -669,6 +715,8 @@ export async function runAttioCsvImportFromText(input: {
     imported: added.length,
     skipped: failed.length,
     byStage,
+    fieldsWritten: [...fieldsSeen],
+    fieldsCreated: fieldPlan.created,
     totalInFile: allRows.length,
     importedCap: maxRows,
     truncated: allRows.length > maxRows,

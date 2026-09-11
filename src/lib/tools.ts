@@ -1375,7 +1375,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from attached CSV/Excel into an Attio list. Supports (1) ONE campaign as 3 files: delivered + opened + clicked — merge once; (2) ONE combined engagement file with Sent/Open/Click sections or columns. Stages default Prospect / Open / Clicks (Click > Open > Prospect). Never call this 3 times for 3 files of the same campaign. Background + Attio 429 retries. Do not invent counts.",
+            "Import people from attached CSV/Excel into an Attio list. Writes ALL useful CSV columns onto People (job title, LinkedIn, website/company, custom fields — creates missing People attributes when needed). Supports one campaign as 3 files (delivered/opened/clicked) or one combined file. Stages default Prospect / Open / Clicks. Use ONCE. Background + Attio 429 retries. Do not invent counts.",
           parameters: {
             type: "object",
             properties: {
