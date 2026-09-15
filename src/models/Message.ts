@@ -13,6 +13,7 @@ const MessageSchema = new Schema(
         name: { type: String, required: true },
         type: { type: String, default: "" },
         size: { type: Number, default: 0 },
+        uploadId: { type: String, default: "" },
         _id: false,
       },
     ],

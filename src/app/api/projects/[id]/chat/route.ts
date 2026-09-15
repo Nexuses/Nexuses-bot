@@ -6,7 +6,7 @@ import {
   toolFilePayload,
   type ExtractedFile,
 } from "@/lib/attachments";
-import { deleteChatUpload, loadChatUploadFile } from "@/lib/chat-uploads";
+import { bindChatUpload, loadChatUploadFile, loadRecentChatUploads } from "@/lib/chat-uploads";
 import { ensureAutomationRunner } from "@/lib/automations";
 import { ensureChatJobRunner } from "@/lib/chat-jobs";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
@@ -189,33 +189,111 @@ export async function POST(request: Request, { params }: Params) {
   if (text.length > 8000) return jsonError("Message is too long");
 
   let extracted: ExtractedFile[] = [];
+  let usedUploadIds: string[] = [];
   try {
     const fromUploads = await Promise.all(
       uploadIds.map(async (uploadId) => {
-        const { file } = await loadChatUploadFile({
+        const { file, meta } = await loadChatUploadFile({
           userId: session.userId,
           projectId: id,
           uploadId,
         });
-        return extractUploadedFile(file);
+        usedUploadIds.push(meta.id);
+        const extractedFile = await extractUploadedFile(file);
+        extractedFile.meta = { ...extractedFile.meta, uploadId: meta.id };
+        return extractedFile;
       }),
     );
     const fromFiles = await Promise.all(files.map((file) => extractUploadedFile(file)));
     extracted = [...fromUploads, ...fromFiles];
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : "Could not read a file");
-  } finally {
-    // Best-effort cleanup so disk does not fill with chat CSVs.
-    await Promise.all(uploadIds.map((uploadId) => deleteChatUpload(id, uploadId)));
   }
 
   const displayText =
     text ||
     (extracted.length === 1
       ? `Uploaded ${extracted[0].meta.name}`
-      : `Uploaded ${extracted.length} files`);
-  const llmText = buildFilePrompt(displayText, extracted);
-  const attachments = extracted.map((item) => item.meta);
+      : extracted.length > 1
+        ? `Uploaded ${extracted.length} files`
+        : "");
+
+  let chat = requestedChatId
+    ? await getOwnedChat(session.userId, id, requestedChatId)
+    : null;
+  if (requestedChatId && !chat) return jsonError("Chat not found", 404);
+  if (!chat) {
+    chat = await Chat.create({
+      userId: session.userId,
+      projectId: id,
+      title: titleFromText(displayText || text),
+    });
+  } else if (!chat.title || chat.title === "New chat") {
+    chat.title = titleFromText(displayText || text);
+    await chat.save();
+  } else {
+    chat.updatedAt = new Date();
+    await chat.save();
+  }
+
+  // Keep uploads available for follow-up turns in this chat (do not delete after one request).
+  if (usedUploadIds.length) {
+    await Promise.all(
+      usedUploadIds.map((uploadId) =>
+        bindChatUpload({
+          userId: session.userId,
+          projectId: id,
+          uploadId,
+          chatId: String(chat!._id),
+        }),
+      ),
+    );
+  }
+
+  const reusedPriorUploads = !files.length && !uploadIds.length;
+  // If this turn has no new files, reuse spreadsheets from earlier messages in this chat.
+  if (!extracted.length) {
+    const prior = await Message.find({
+      userId: session.userId,
+      projectId: id,
+      chatId: chat._id,
+      role: "user",
+      "attachments.uploadId": { $exists: true, $ne: "" },
+    })
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .lean();
+    const priorIds = prior.flatMap((message) =>
+      (message.attachments || [])
+        .map((item: { uploadId?: string }) => String(item.uploadId || "").trim())
+        .filter(Boolean),
+    );
+    if (priorIds.length) {
+      const reloaded = await loadRecentChatUploads({
+        userId: session.userId,
+        projectId: id,
+        chatId: String(chat._id),
+        uploadIds: priorIds,
+      });
+      extracted = await Promise.all(
+        reloaded.map(async ({ file, meta }) => {
+          const item = await extractUploadedFile(file);
+          item.meta = { ...item.meta, uploadId: meta.id };
+          return item;
+        }),
+      );
+    }
+  }
+
+  const attachments = reusedPriorUploads
+    ? [] // don't re-list prior files as new attachments on this message
+    : extracted.map((item) => item.meta);
+  let llmText = buildFilePrompt(displayText || text, extracted);
+  if (reusedPriorUploads && extracted.length) {
+    llmText = `${llmText}\n\n(Note: spreadsheet(s) from earlier in this chat are still available to tools: ${extracted
+      .map((f) => f.meta.name)
+      .join(", ")}. Do NOT ask the user to re-upload them — call share_csv_dashboard / import tools directly.)`;
+  }
   const imageParts: ContentPart[] = extracted.flatMap((item) =>
     item.image
       ? [
@@ -232,24 +310,6 @@ export async function POST(request: Request, { params }: Params) {
   const userContent: string | ContentPart[] = imageParts.length
     ? [{ type: "text", text: llmText }, ...imageParts]
     : llmText;
-
-  let chat = requestedChatId
-    ? await getOwnedChat(session.userId, id, requestedChatId)
-    : null;
-  if (requestedChatId && !chat) return jsonError("Chat not found", 404);
-  if (!chat) {
-    chat = await Chat.create({
-      userId: session.userId,
-      projectId: id,
-      title: titleFromText(displayText),
-    });
-  } else if (!chat.title || chat.title === "New chat") {
-    chat.title = titleFromText(displayText);
-    await chat.save();
-  } else {
-    chat.updatedAt = new Date();
-    await chat.save();
-  }
 
   const [history, integrationDocs] = await Promise.all([
     Message.find({ userId: session.userId, projectId: id, chatId: chat._id })
@@ -330,6 +390,8 @@ Formatting (required):
 - When showing HTML (page, email, invite, dashboard), put it in an html fenced code block (triple backticks + html) so the user gets Preview and Share link buttons — but for LARGE dashboards do not dump the full table in the fence; use tools instead.
 - For a live / public / shareable dashboard link: NEVER invent or guess a /p/... URL — fake links 404.
 - Attached CSV/Excel (any size, including multi‑MB campaign reports): call share_csv_dashboard with a title (and optional filter opened|clicked|replied|sent). The server reads the FULL file — do not pass rows/CSV text and do not ask the user to re-upload or paste. Then paste [Open report](url).
+- When the user attaches MULTIPLE campaign CSVs and asks for one combined / drill-down report (like the Investera 3-campaign layout): call share_csv_dashboard ONCE with a combined title and omit file_name so all attached CSVs merge into ONE page (campaign tabs + Stage badges + Yes/No open/click). Never dump raw sequence rows or markdown tables into chat.
+- Spreadsheets uploaded earlier in THIS chat stay available to tools for ~48 hours. If a follow-up asks to rebuild/fix the report and the note says files are still available, call share_csv_dashboard immediately — NEVER ask the user to re-attach the same files.
 - Campaign / lead tables when data is NOT from an attached spreadsheet: call share_data_dashboard with title, kpis, columns, and rows JSON, then paste [Open report](url).
 - Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste the returned url as [Open report](url).
 - Small HTML only: share_html with the full document is fine — also paste [Open report](url) from the tool result.

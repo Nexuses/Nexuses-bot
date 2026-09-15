@@ -306,7 +306,9 @@ ${KIT_HEAD}
 }
 
 export const HTML_DASHBOARD_PROMPT = `When creating HTML dashboards / reports / shareable pages:
-- Prefer share_csv_dashboard when a CSV file is attached (server reads the full file — do not pass rows). Prefer share_data_dashboard for campaign/lead reports when you already have structured JSON (pass title, kpis, columns, rows). The server builds the full HTML — do NOT emit hundreds of table rows yourself.
+- Prefer share_csv_dashboard when a CSV/Excel file is attached (server reads the full file — do not pass rows). For Lemlist/outreach campaign CSVs with Lead Name / Opened Time / Clicked Time, the server builds the polished drill-down automatically (KPI cards, charts, campaign tabs, Stage badges, Yes/No open/click) — do NOT hand-build HTML or dump raw sequence columns.
+- When multiple campaign CSVs are attached and the user wants one combined report, call share_csv_dashboard once (omit file_name) so all campaigns merge into a single page.
+- Prefer share_data_dashboard for campaign/lead reports when you already have structured JSON (pass title, kpis, columns, rows). The server builds the full HTML — do NOT emit hundreds of table rows yourself.
 - For custom one-off HTML that is SMALL (roughly under ~40 table rows or a short page): call share_html once with the full HTML, and optionally also show a short \`\`\`html preview fence.
 - For LARGE custom HTML (long tables, multi-section reports): NEVER put the full document in one share_html call or one fence (it truncates and breaks JSON). Instead:
   1) share_html_begin

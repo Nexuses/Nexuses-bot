@@ -17,6 +17,8 @@ export type ChatAttachment = {
   name: string;
   type: string;
   size: number;
+  /** Server-only: keeps the file available for later turns in the same chat. */
+  uploadId?: string;
 };
 
 export type ChatThreadDTO = {

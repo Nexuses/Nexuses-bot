@@ -7,11 +7,16 @@ export type StoredUploadMeta = {
   id: string;
   userId: string;
   projectId: string;
+  chatId?: string;
   name: string;
   type: string;
   size: number;
   createdAt: string;
+  /** ISO expiry — uploads are kept across chat turns until this time. */
+  expiresAt?: string;
 };
+
+const UPLOAD_TTL_MS = 48 * 60 * 60 * 1000;
 
 function rootDir() {
   return path.join(process.cwd(), ".data", "chat-uploads");
@@ -19,6 +24,10 @@ function rootDir() {
 
 function uploadDir(projectId: string, uploadId: string) {
   return path.join(rootDir(), projectId, uploadId);
+}
+
+function defaultExpiresAt(from = new Date()) {
+  return new Date(from.getTime() + UPLOAD_TTL_MS).toISOString();
 }
 
 export async function beginChunkedUpload(input: {
@@ -49,6 +58,7 @@ export async function beginChunkedUpload(input: {
     size: input.size,
     totalChunks: input.totalChunks,
     createdAt: new Date().toISOString(),
+    expiresAt: defaultExpiresAt(),
     incomplete: true,
   };
   await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta));
@@ -129,10 +139,12 @@ export async function finishChunkedUpload(input: {
     id: meta.id,
     userId: meta.userId,
     projectId: meta.projectId,
+    chatId: meta.chatId,
     name: meta.name,
     type: meta.type,
     size: assembled.length,
     createdAt: meta.createdAt,
+    expiresAt: meta.expiresAt || defaultExpiresAt(),
   };
   await writeFile(path.join(dir, "meta.json"), JSON.stringify(finalMeta));
   return finalMeta;
@@ -142,6 +154,7 @@ export async function saveChatUpload(input: {
   userId: string;
   projectId: string;
   file: File;
+  chatId?: string;
 }): Promise<StoredUploadMeta> {
   if (input.file.size > MAX_CHAT_FILE_BYTES) {
     throw new Error(
@@ -156,13 +169,38 @@ export async function saveChatUpload(input: {
     id,
     userId: input.userId,
     projectId: input.projectId,
+    chatId: input.chatId || undefined,
     name: input.file.name || "upload",
     type: input.file.type || "application/octet-stream",
     size: input.file.size,
     createdAt: new Date().toISOString(),
+    expiresAt: defaultExpiresAt(),
   };
   await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta));
   await writeFile(path.join(dir, "file"), bytes);
+  return meta;
+}
+
+export async function bindChatUpload(input: {
+  userId: string;
+  projectId: string;
+  uploadId: string;
+  chatId: string;
+}): Promise<StoredUploadMeta | null> {
+  const dir = uploadDir(input.projectId, input.uploadId);
+  let rawMeta: string;
+  try {
+    rawMeta = await readFile(path.join(dir, "meta.json"), "utf8");
+  } catch {
+    return null;
+  }
+  const meta = JSON.parse(rawMeta) as StoredUploadMeta & { incomplete?: boolean };
+  if (meta.userId !== input.userId || meta.projectId !== input.projectId || meta.incomplete) {
+    return null;
+  }
+  meta.chatId = input.chatId;
+  meta.expiresAt = defaultExpiresAt();
+  await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta));
   return meta;
 }
 
@@ -182,9 +220,38 @@ export async function loadChatUploadFile(input: {
   if (meta.userId !== input.userId || meta.projectId !== input.projectId || meta.incomplete) {
     throw new Error("Upload not found or expired. Re-attach the file and try again.");
   }
+  if (meta.expiresAt && Date.parse(meta.expiresAt) < Date.now()) {
+    await deleteChatUpload(input.projectId, input.uploadId);
+    throw new Error("Upload not found or expired. Re-attach the file and try again.");
+  }
   const bytes = await readFile(path.join(dir, "file"));
   const file = new File([bytes], meta.name, { type: meta.type });
   return { meta, file };
+}
+
+/** Reload spreadsheets previously uploaded in this chat (so follow-ups don't re-ask). */
+export async function loadRecentChatUploads(input: {
+  userId: string;
+  projectId: string;
+  chatId: string;
+  uploadIds?: string[];
+}): Promise<Array<{ meta: StoredUploadMeta; file: File }>> {
+  const ids = [...new Set((input.uploadIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
+  const loaded: Array<{ meta: StoredUploadMeta; file: File }> = [];
+  for (const uploadId of ids) {
+    try {
+      const item = await loadChatUploadFile({
+        userId: input.userId,
+        projectId: input.projectId,
+        uploadId,
+      });
+      if (item.meta.chatId && item.meta.chatId !== input.chatId) continue;
+      loaded.push(item);
+    } catch {
+      // expired / missing
+    }
+  }
+  return loaded;
 }
 
 export async function deleteChatUpload(projectId: string, uploadId: string) {

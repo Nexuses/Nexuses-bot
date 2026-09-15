@@ -35,6 +35,12 @@ import { getOauthConnector, isOauthProvider } from "@/lib/oauth/catalog";
 import { notionOauthConfigured, notionRequest } from "@/lib/oauth/notion";
 import { Integration } from "@/models/Integration";
 import { createHtmlShare, beginHtmlDraft, appendHtmlDraft, finishHtmlDraft, createDataDashboardShare } from "@/lib/html-shares";
+import {
+  buildOutreachLeads,
+  campaignNameFromFile,
+  looksLikeOutreachEngagementCsv,
+  renderOutreachCampaignReport,
+} from "@/lib/outreach-report";
 import { fetchPublicUrl } from "@/lib/fetch-url";
 import type { ToolDef } from "@/lib/llm";
 import type { AuthType, Provider } from "@/types/chat";
@@ -1187,7 +1193,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
       function: {
         name: "share_csv_dashboard",
         description:
-          "BEST for large attached CSV/Excel campaign reports. Reads the FULL attached spreadsheet on the server — do NOT pass row data or paste CSV. Builds KPIs + branded HTML table. Use filter opened|clicked|replied|sent when the user asks who opened/clicked/etc. Prefer this over share_data_dashboard when a CSV/Excel file is attached.",
+          "BEST for attached CSV/Excel campaign reports (one or many). Reads the FULL attached spreadsheet(s) on the server — do NOT pass row data. For Lemlist/outreach engagement CSVs (Lead Name, Opened Time, Clicked Time, etc.) builds a polished drill-down: KPI cards, charts, campaign filter tabs, search, and table (Campaign · Name · Email · Stage · Opened · Clicked) with unique leads (not raw sequence dumps). When multiple campaign CSVs are attached, merges them into ONE combined report. Prefer this over share_data_dashboard / hand-built HTML.",
         parameters: {
           type: "object",
           properties: {
@@ -1196,15 +1202,22 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
             filter: {
               type: "string",
               description:
-                "Optional row filter: all (default), opened, clicked, replied, sent, unsubscribed",
+                "Optional row filter for flat CSVs: all (default), opened, clicked, replied, sent, unsubscribed. Ignored for outreach engagement reports (use campaign tabs on the page).",
             },
             limit: {
               type: "number",
-              description: "Max table rows to show (default 400, max 1000). KPIs still use the full file.",
+              description:
+                "Max table rows for flat CSVs (default 400, max 1000). Outreach reports show all unique leads.",
             },
             file_name: {
               type: "string",
-              description: "Optional attached CSV file name when multiple files are present",
+              description:
+                "Optional single file name. Omit to use all attached campaign CSVs (preferred for combined reports).",
+            },
+            combine: {
+              type: "boolean",
+              description:
+                "When true (default if multiple CSVs), merge all attached engagement CSVs into one report with a Campaign column.",
             },
             client_logo: { type: "string" },
             client_name: { type: "string" },
@@ -2052,12 +2065,19 @@ export async function runTool(
     if (!title) throw new Error("title is required");
     const fileName = String(args.file_name || args.fileName || "").trim().toLowerCase();
     const files = context.files || [];
+    const sheetFiles = files.filter(
+      (file) =>
+        /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name) ||
+        (file.text.includes(",") &&
+          !file.text.startsWith("Large CSV") &&
+          !file.text.startsWith("Large Excel")),
+    );
+    const selectedFiles = fileName
+      ? sheetFiles.filter((file) => file.name.toLowerCase() === fileName)
+      : sheetFiles;
     const csvText =
       String(args.csv || "").trim() ||
-      (fileName
-        ? files.find((file) => file.name.toLowerCase() === fileName)?.text
-        : undefined) ||
-      files.find((file) => /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(file.name))?.text ||
+      selectedFiles[0]?.text ||
       files.find(
         (file) =>
           file.text.includes(",") &&
@@ -2065,14 +2085,95 @@ export async function runTool(
           !file.text.startsWith("Large Excel"),
       )?.text ||
       "";
-    if (!csvText) {
+    if (!selectedFiles.length && !csvText) {
       throw new Error(
-        "No attached spreadsheet found. Ask the user to attach a CSV or Excel (.xlsx/.xls) file, then call share_csv_dashboard again (do not invent rows).",
+        "No attached spreadsheet found for this chat. If the user already uploaded CSVs earlier in THIS chat, they should still be available — do not ask them to re-upload unless tools truly have zero files. Otherwise ask them to attach CSV/Excel once.",
       );
     }
+
+    const clientLogo =
+      String(args.client_logo || args.clientLogo || context.projectLogo || "").trim() ||
+      undefined;
+    const clientName =
+      String(args.client_name || args.clientName || context.projectName || "").trim() ||
+      undefined;
+
+    const bundles = (selectedFiles.length ? selectedFiles : [{ name: "Campaign", text: csvText }])
+      .map((file) => {
+        const rows = parseCsv(file.text);
+        return {
+          campaign: campaignNameFromFile(file.name),
+          rows,
+          fileName: file.name,
+        };
+      })
+      .filter((bundle) => bundle.rows.length > 0);
+
+    if (!bundles.length) throw new Error("Spreadsheet has no data rows.");
+
+    const combineDefault = bundles.length > 1;
+    const combine =
+      args.combine === false || args.combine === "false"
+        ? false
+        : args.combine === true || args.combine === "true" || combineDefault;
+
+    const outreachBundles = bundles.filter((bundle) =>
+      looksLikeOutreachEngagementCsv(bundle.rows),
+    );
+    const useOutreach =
+      outreachBundles.length > 0 &&
+      (combine || outreachBundles.length === bundles.length);
+
+    if (useOutreach) {
+      context.onStatus?.(
+        `Building outreach drill-down from ${outreachBundles.length} campaign file${outreachBundles.length === 1 ? "" : "s"}…`,
+      );
+      const leads = buildOutreachLeads(
+        (combine ? outreachBundles : outreachBundles.slice(0, 1)).map((bundle) => ({
+          campaign: bundle.campaign,
+          rows: bundle.rows,
+        })),
+      );
+      if (!leads.length) {
+        throw new Error("No leads with email addresses found in the campaign CSV(s).");
+      }
+      const subtitle =
+        String(args.subtitle || "").trim() ||
+        [...new Set(leads.map((lead) => lead.campaign))].join(" · ");
+      const html = renderOutreachCampaignReport({
+        title,
+        subtitle,
+        leads,
+        clientLogoUrl: clientLogo,
+        clientName,
+      });
+      const share = await createHtmlShare({
+        userId: context.userId,
+        projectId: context.projectId,
+        origin: context.origin,
+        title,
+        html,
+        clientLogoUrl: clientLogo,
+        clientName,
+      });
+      const opened = leads.filter((lead) => lead.opened).length;
+      const clicked = leads.filter((lead) => lead.clicked).length;
+      const replied = leads.filter((lead) => lead.replied).length;
+      return clip({
+        ok: true,
+        title: share.title,
+        url: share.url,
+        total: leads.length,
+        opened,
+        clicked,
+        replied,
+        campaigns: [...new Set(leads.map((lead) => lead.campaign))],
+        note: "Polished outreach drill-down (unique leads, campaign tabs, Stage badges). Paste as [Open report](url).",
+      });
+    }
+
     context.onStatus?.("Parsing the spreadsheet…");
-    const parsed = parseCsv(csvText);
-    if (!parsed.length) throw new Error("Spreadsheet has no data rows.");
+    const parsed = bundles[0].rows;
     const filter = String(args.filter || "all").trim() || "all";
     const limit = Math.min(Math.max(Number(args.limit) || 400, 1), 1000);
     context.onStatus?.(`Building dashboard from ${parsed.length.toLocaleString()} rows…`);
@@ -2086,12 +2187,8 @@ export async function runTool(
       userId: context.userId,
       projectId: context.projectId,
       origin: context.origin,
-      clientLogoUrl:
-        String(args.client_logo || args.clientLogo || context.projectLogo || "").trim() ||
-        undefined,
-      clientName:
-        String(args.client_name || args.clientName || context.projectName || "").trim() ||
-        undefined,
+      clientLogoUrl: clientLogo,
+      clientName,
       dashboard: {
         title: dashboard.title,
         subtitle: dashboard.subtitle,
