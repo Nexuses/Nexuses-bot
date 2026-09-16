@@ -60,8 +60,30 @@ function pickAttioId(data: unknown, keys: string[]) {
   return record?.data?.api_slug || "";
 }
 
+function detectCsvDelimiter(text: string) {
+  const firstLine = text.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] || "";
+  let commas = 0;
+  let semis = 0;
+  let tabs = 0;
+  let inQuotes = false;
+  for (let i = 0; i < firstLine.length; i += 1) {
+    const ch = firstLine[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    if (ch === ",") commas += 1;
+    if (ch === ";") semis += 1;
+    if (ch === "\t") tabs += 1;
+  }
+  if (tabs > commas && tabs > semis) return "\t";
+  return semis > commas ? ";" : ",";
+}
+
 function splitCsvTable(text: string) {
   const input = text.replace(/^\uFEFF/, "");
+  const delimiter = detectCsvDelimiter(input);
   const table: string[][] = [];
   let row: string[] = [];
   let cell = "";
@@ -95,7 +117,7 @@ function splitCsvTable(text: string) {
       quoted = true;
       continue;
     }
-    if (char === "," || char === "\t") {
+    if (char === delimiter) {
       pushCell();
       continue;
     }
@@ -112,18 +134,40 @@ function splitCsvTable(text: string) {
   return table;
 }
 
+const EMAIL_HEADERS = [
+  "email",
+  "email address",
+  "e-mail",
+  "work email",
+  "email_address",
+  "lead email",
+  "lead_email",
+  "email_id",
+  "email id",
+  "mail",
+  "recipient email",
+  "recipient",
+];
+
+function isEmailHeader(header: string) {
+  const h = header.trim().toLowerCase();
+  if (!h) return false;
+  if (EMAIL_HEADERS.includes(h)) return true;
+  const compact = h.replace(/[_\s-]+/g, "");
+  return (
+    compact === "email" ||
+    compact === "emailid" ||
+    compact === "emailaddress" ||
+    compact === "leademail" ||
+    compact === "workemail" ||
+    compact === "recipientemail"
+  );
+}
+
 function isEmailHeaderRow(cols: string[]) {
   const labels = cols.map((c) => c.trim().toLowerCase()).filter(Boolean);
   if (labels.length < 2) return false;
-  return labels.some(
-    (h) =>
-      h === "email" ||
-      h === "email address" ||
-      h === "e-mail" ||
-      h === "email_address" ||
-      h === "work email" ||
-      h === "lead email",
-  );
+  return labels.some((h) => isEmailHeader(h));
 }
 
 function engagementSectionFromRow(cols: string[]) {
@@ -166,17 +210,17 @@ function cell(row: Record<string, string>, keys: string[]) {
 }
 
 function emailFromRecord(row: Record<string, string>) {
-  return cell(row, [
-    "email",
-    "email address",
-    "e-mail",
-    "work email",
-    "email_address",
-    "lead email",
-    "lead_email",
-  ])
-    .trim()
-    .toLowerCase();
+  const fromKnown = cell(row, EMAIL_HEADERS).trim().toLowerCase();
+  if (fromKnown.includes("@")) return fromKnown;
+
+  // Brevo / custom exports sometimes use unusual labels — accept any header that
+  // clearly looks like an email column and holds an address.
+  for (const [header, value] of Object.entries(row)) {
+    if (!isEmailHeader(header)) continue;
+    const email = String(value || "").trim().toLowerCase();
+    if (email.includes("@")) return email;
+  }
+  return "";
 }
 
 const ENGAGEMENT_RANK: Record<string, number> = {
@@ -301,15 +345,52 @@ function rowMatchesCsvFilter(row: Record<string, string>, filter: string) {
   const status = cell(row, ["status", "engagement", "event", "activity", "lead status"]).toLowerCase();
   if (f === "opened" || f === "open") {
     return (
-      hasEngagementValue(cell(row, ["opened time", "opened_time", "open time", "opened", "open date"])) ||
-      Number(cell(row, ["open count", "open_count", "opens"]) || 0) > 0 ||
+      hasEngagementValue(
+        cell(row, [
+          "opened time",
+          "opened_time",
+          "open time",
+          "opened",
+          "open date",
+          "open_date",
+        ]),
+      ) ||
+      Number(
+        cell(row, [
+          "open count",
+          "open_count",
+          "opens",
+          "total opens",
+          "total_opens",
+        ]) || 0,
+      ) > 0 ||
       (/open/.test(status) && !/click/.test(status))
     );
   }
   if (f === "clicked" || f === "click") {
     return (
-      hasEngagementValue(cell(row, ["clicked time", "clicked_time", "click time", "clicked", "cta clicked"])) ||
-      Number(cell(row, ["click count", "click_count", "clicks"]) || 0) > 0 ||
+      hasEngagementValue(
+        cell(row, [
+          "clicked time",
+          "clicked_time",
+          "click time",
+          "clicked",
+          "cta clicked",
+          "click date",
+          "click_date",
+        ]),
+      ) ||
+      Number(
+        cell(row, [
+          "click count",
+          "click_count",
+          "clicks",
+          "clicked links count",
+          "clicked_links_count",
+          "total clicks",
+          "total_clicks",
+        ]) || 0,
+      ) > 0 ||
       /click/.test(status)
     );
   }
@@ -340,7 +421,7 @@ function engagementStageForRow(
   const stageReply = String(args.stage_reply || args.stageReply || "hot").trim() || "hot";
   const stageClick =
     String(args.stage_click || args.stageClick || "Clicks").trim() || "Clicks";
-  const stageOpen = String(args.stage_open || args.stageOpen || "Open").trim() || "Open";
+  const stageOpen = String(args.stage_open || args.stageOpen || "Opens").trim() || "Opens";
   const stageSent =
     String(
       args.stage_sent ||
@@ -588,15 +669,7 @@ export async function runAttioCsvImportFromText(input: {
       throw new Error("Stopped by user");
     }
     await sleep(120);
-    const email = cell(row, [
-      "email",
-      "email address",
-      "e-mail",
-      "work email",
-      "email_address",
-      "lead email",
-      "lead_email",
-    ]);
+    const email = emailFromRecord(row);
     const { first, last, full } = parseName(row);
     const label = full || email || "row";
     const rowStage = effectiveMapEngagement
