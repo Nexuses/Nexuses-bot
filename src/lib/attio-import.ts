@@ -1,3 +1,5 @@
+import { attioNameValues, looksLikeEmail, splitPersonName } from "@/lib/attio-person-fields";
+
 const ATTIO = "https://api.attio.com";
 
 function sleep(ms: number) {
@@ -312,7 +314,11 @@ export function parseCsv(text: string) {
 }
 
 function parseName(row: Record<string, string>) {
-  const full = cell(row, [
+  const pick = (keys: string[]) => {
+    const value = cell(row, keys).trim();
+    return value && !looksLikeEmail(value) ? value : "";
+  };
+  const full = pick([
     "person name",
     "name",
     "full name",
@@ -322,14 +328,16 @@ function parseName(row: Record<string, string>) {
     "lead_name",
     "contact name",
   ]);
-  let first = cell(row, ["first name", "first_name", "firstname", "first"]);
-  let last = cell(row, ["last name", "last_name", "lastname", "last", "surname"]);
-  if (!first && full) {
-    const parts = full.split(/\s+/);
-    first = parts[0] || "";
-    last = parts.slice(1).join(" ");
+  let first = pick(["first name", "first_name", "firstname", "first"]);
+  let last = pick(["last name", "last_name", "lastname", "last", "surname"]);
+  if (!first && !last && full) {
+    return splitPersonName(full);
   }
-  return { first, last, full: full || [first, last].filter(Boolean).join(" ") };
+  return {
+    first,
+    last,
+    full: full || [first, last].filter(Boolean).join(" "),
+  };
 }
 
 function hasEngagementValue(value: string) {
@@ -337,6 +345,124 @@ function hasEngagementValue(value: string) {
   if (!v) return false;
   if (/^(0|false|no|n\/a|na|-)$/i.test(v)) return false;
   return true;
+}
+
+/** Parse Brevo-style dates like "28-07-2026 23:38:38" or ISO. */
+export function parseEngagementDate(value: string): Date | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  const euro = raw.match(
+    /^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/,
+  );
+  if (euro) {
+    const day = Number(euro[1]);
+    const month = Number(euro[2]) - 1;
+    const year = Number(euro[3]);
+    const hour = Number(euro[4] || 0);
+    const minute = Number(euro[5] || 0);
+    const second = Number(euro[6] || 0);
+    const date = new Date(year, month, day, hour, minute, second);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * "Real" open/click = activity at least `minSeconds` after send (default 45s).
+ * Clears instant/bot/proxy opens so they stage as Prospect/Sent instead.
+ */
+export function applyRealEngagementFilter(
+  row: Record<string, string>,
+  minSeconds = 45,
+): Record<string, string> {
+  const send = parseEngagementDate(
+    cell(row, [
+      "send date",
+      "send_date",
+      "sent time",
+      "sent_time",
+      "sent",
+      "delivered date",
+      "delivered_date",
+      "delivered",
+    ]),
+  );
+  if (!send) return row;
+
+  const next = { ...row };
+  const minMs = Math.max(0, minSeconds) * 1000;
+
+  const openAt = parseEngagementDate(
+    cell(row, [
+      "open date",
+      "open_date",
+      "opened time",
+      "opened_time",
+      "open time",
+      "opened",
+    ]),
+  );
+  if (openAt && openAt.getTime() - send.getTime() < minMs) {
+    for (const key of Object.keys(next)) {
+      if (/^open(_|\s)?date$/i.test(key) || /^opened(\s|_)?time$/i.test(key)) {
+        next[key] = "";
+      }
+      if (/^(total\s*)?opens?$/i.test(key) || /^open(_|\s)?count$/i.test(key)) {
+        next[key] = "0";
+      }
+      if (/^opened$/i.test(key)) next[key] = "";
+    }
+    next.opened = "";
+    next["open count"] = "0";
+    next["total opens"] = "0";
+  }
+
+  const clickAt = parseEngagementDate(
+    cell(row, [
+      "click date",
+      "click_date",
+      "clicked time",
+      "clicked_time",
+      "click time",
+      "clicked",
+    ]),
+  );
+  const clickCount = Number(
+    cell(row, [
+      "click count",
+      "click_count",
+      "clicks",
+      "clicked links count",
+      "clicked_links_count",
+      "total clicks",
+    ]) || 0,
+  );
+  // If we only have a click count (no timestamp), require a real open window first.
+  const clickTooSoon =
+    (clickAt && clickAt.getTime() - send.getTime() < minMs) ||
+    (!clickAt && clickCount > 0 && openAt && openAt.getTime() - send.getTime() < minMs);
+
+  if (clickTooSoon) {
+    for (const key of Object.keys(next)) {
+      if (/^click(_|\s)?date$/i.test(key) || /^clicked(\s|_)?time$/i.test(key)) {
+        next[key] = "";
+      }
+      if (
+        /^(total\s*)?clicks?$/i.test(key) ||
+        /^click(_|\s)?count$/i.test(key) ||
+        /^clicked(_|\s)?links(_|\s)?count$/i.test(key)
+      ) {
+        next[key] = "0";
+      }
+      if (/^clicked$/i.test(key)) next[key] = "";
+    }
+    next.clicked = "";
+    next["click count"] = "0";
+    next.clicked_links_count = "0";
+  }
+
+  return next;
 }
 
 function rowMatchesCsvFilter(row: Record<string, string>, filter: string) {
@@ -548,10 +674,31 @@ export async function runAttioCsvImportFromText(input: {
   const listName = String(input.args.list || input.args.list_name || input.args.listName || "").trim();
   if (!listName) throw new Error("List name is required");
   const stage = String(input.args.stage || input.args.status || "").trim();
-  const allRows = parseCsv(input.csvText);
+  const realEngagement =
+    input.args.real_engagement === true ||
+    input.args.realEngagement === true ||
+    input.args.real_opens === true ||
+    input.args.realOpens === true ||
+    /real/i.test(String(input.args.engagement_mode || input.args.engagementMode || ""));
+  const realSeconds = Math.min(
+    Math.max(Number(input.args.real_seconds || input.args.realSeconds) || 45, 1),
+    600,
+  );
+  const parsedRows = parseCsv(input.csvText).map((row) =>
+    realEngagement ? applyRealEngagementFilter(row, realSeconds) : row,
+  );
+  const allRows = parsedRows;
   const maxRows = Math.min(Math.max(Number(input.args.limit) || 2000, 1), 5000);
   const rows = allRows.slice(0, maxRows);
   if (!rows.length) throw new Error("CSV has no data rows. Include a header row and at least one contact.");
+
+  if (realEngagement) {
+    await input.onStatus?.(
+      `Using real opens/clicks only (≥${realSeconds}s after send)…`,
+      0,
+      rows.length,
+    );
+  }
 
   if (allRows.length > maxRows) {
     await input.onStatus?.(
@@ -703,13 +850,7 @@ export async function runAttioCsvImportFromText(input: {
             data: {
               values: {
                 email_addresses: [{ email_address: email }],
-                name: [
-                  {
-                    first_name: first || full,
-                    last_name: last,
-                    full_name: full || email,
-                  },
-                ],
+                ...attioNameValues(full || [first, last].filter(Boolean).join(" ")),
                 ...extraValues,
               },
             },

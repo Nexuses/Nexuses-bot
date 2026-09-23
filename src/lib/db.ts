@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 // Register every schema when connecting. Next.js production chunks can load
 // Project (or other models) without User, and .populate("members") then throws
 // MissingSchemaError: Schema hasn't been registered for model "User".
+import "@/models/ChatJob";
 import "@/models/User";
 import "@/models/Project";
 import "@/models/Integration";

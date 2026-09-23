@@ -37,8 +37,8 @@ export function serializeChatJob(doc: {
   lastSummary?: string;
   error?: string;
   result?: unknown;
-  createdAt?: Date | string;
-  finishedAt?: Date | string;
+  createdAt?: Date | string | null;
+  finishedAt?: Date | string | null;
 }): ChatJobDTO {
   return {
     _id: String(doc._id),
@@ -133,6 +133,51 @@ export async function enqueueBrevoToAttioImport(input: {
   return serializeChatJob(job);
 }
 
+export async function enqueueCampaignToAttioOnce(input: {
+  userId: string;
+  projectId: string;
+  chatId: string;
+  sourceProvider: "lemlist" | "brevo" | "other";
+  sourceIntegrationName?: string;
+  campaignName: string;
+  attioList: string;
+  stageOpen?: string;
+  stageClick?: string;
+  realEngagement?: boolean;
+}) {
+  await dbConnect();
+  const from =
+    input.sourceProvider === "other"
+      ? input.sourceIntegrationName || "custom"
+      : input.sourceProvider;
+  const job = await ChatJob.create({
+    userId: input.userId,
+    projectId: input.projectId,
+    chatId: input.chatId,
+    type: "campaign_to_attio_once",
+    status: "queued",
+    title: `Sync ${input.campaignName} → Attio “${input.attioList}”`,
+    args: {
+      sourceProvider: input.sourceProvider,
+      sourceIntegrationName: input.sourceIntegrationName || "",
+      campaignName: input.campaignName,
+      attioList: input.attioList,
+      stageOpen: input.stageOpen || "Open",
+      stageClick: input.stageClick || "Click",
+      realEngagement: Boolean(input.realEngagement),
+    },
+    progressDone: 0,
+    progressTotal: 0,
+    lastSummary: `Queued one-time sync from ${from}…`,
+    nextRunAt: new Date(),
+  });
+
+  ensureChatJobRunner();
+  void processChatJobById(String(job._id));
+
+  return serializeChatJob(job);
+}
+
 async function updateJob(id: string, patch: Record<string, unknown>) {
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
@@ -140,6 +185,45 @@ async function updateJob(id: string, patch: Record<string, unknown>) {
   }
   if (!Object.keys(clean).length) return;
   await ChatJob.findByIdAndUpdate(id, { $set: clean });
+}
+
+/** Progress must only move forward — parallel workers can otherwise overwrite 500 with 50. */
+async function updateJobProgress(
+  id: string,
+  input: { text?: string; done?: number; total?: number },
+) {
+  const done =
+    typeof input.done === "number" && Number.isFinite(input.done)
+      ? Math.max(0, Math.floor(input.done))
+      : undefined;
+  const total =
+    typeof input.total === "number" && Number.isFinite(input.total)
+      ? Math.max(0, Math.floor(input.total))
+      : undefined;
+  const text = input.text !== undefined ? String(input.text) : undefined;
+
+  if (done === undefined) {
+    const set: Record<string, unknown> = {};
+    if (text !== undefined) set.lastSummary = text;
+    if (total !== undefined) set.progressTotal = total;
+    if (Object.keys(set).length) await ChatJob.findByIdAndUpdate(id, { $set: set });
+    return;
+  }
+
+  // Only apply when this report is ahead of (or equal to) what's stored.
+  await ChatJob.updateOne(
+    {
+      _id: id,
+      $or: [{ progressDone: { $lte: done } }, { progressDone: { $exists: false } }, { progressDone: null }],
+    },
+    {
+      $set: {
+        progressDone: done,
+        ...(total !== undefined ? { progressTotal: total } : {}),
+        ...(text !== undefined ? { lastSummary: text } : {}),
+      },
+    },
+  );
 }
 
 export async function processChatJobById(jobId: string) {
@@ -151,6 +235,8 @@ export async function processChatJobById(jobId: string) {
         status: "running",
         startedAt: new Date(),
         lastSummary: "Running…",
+        progressDone: 0,
+        error: "",
       },
     },
     { returnDocument: "after" },
@@ -165,23 +251,38 @@ export async function processChatJobById(jobId: string) {
   g.__nexusesChatJobLocks.add(jobId);
 
   try {
-    if (job.type === "attio_csv_import") {
+    const jobType = String(job.type || "").trim();
+    if (jobType === "attio_csv_import") {
       await runAttioCsvImportJob(job);
-    } else if (job.type === "brevo_to_attio") {
+    } else if (jobType === "brevo_to_attio") {
       await runBrevoToAttioJob(job);
+    } else if (jobType === "campaign_to_attio_once") {
+      await runCampaignToAttioOnceJob(job);
     } else {
-      throw new Error(`Unknown job type: ${job.type}`);
+      throw new Error(
+        `Unknown job type: ${jobType || "(empty)"}. Restart the server and retry the sync.`,
+      );
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Job failed";
     const stopped = /stopped by user/i.test(message);
-    await updateJob(jobId, {
-      status: stopped ? "stopped" : "failed",
-      error: message,
-      lastSummary: message,
-      finishedAt: new Date(),
-    });
-    if (!stopped) {
+    // Only mark failed if this run is still the active one (avoids clobbering a reclaim retry).
+    const stillMine = await ChatJob.findOneAndUpdate(
+      {
+        _id: jobId,
+        status: "running",
+        ...(job.startedAt ? { startedAt: job.startedAt } : {}),
+      },
+      {
+        $set: {
+          status: stopped ? "stopped" : "failed",
+          error: message,
+          lastSummary: message,
+          finishedAt: new Date(),
+        },
+      },
+    );
+    if (stillMine && !stopped) {
       await postJobMessage({
         userId: String(job.userId),
         projectId: String(job.projectId),
@@ -190,7 +291,9 @@ export async function processChatJobById(jobId: string) {
         toolsUsed:
           job.type === "brevo_to_attio"
             ? ["brevo_import_campaigns_to_attio"]
-            : ["attio_import_to_list"],
+            : job.type === "campaign_to_attio_once"
+              ? ["sync_campaign_to_attio"]
+              : ["attio_import_to_list"],
         jobId,
       });
     }
@@ -233,11 +336,7 @@ async function runAttioCsvImportJob(job: {
       if (isChatJobCancelled(jobId)) {
         throw new Error("Stopped by user");
       }
-      await updateJob(jobId, {
-        lastSummary: text,
-        progressDone: done ?? undefined,
-        progressTotal: total ?? undefined,
-      });
+      await updateJobProgress(jobId, { text, done, total });
     },
     shouldCancel: () => isChatJobCancelled(jobId),
   });
@@ -344,11 +443,7 @@ async function runBrevoToAttioJob(job: {
     stageClick: String(args.stageClick || "Click"),
     onStatus: async (text, done, total) => {
       if (isChatJobCancelled(jobId)) throw new Error("Stopped by user");
-      await updateJob(jobId, {
-        lastSummary: text,
-        progressDone: done ?? undefined,
-        progressTotal: total ?? undefined,
-      });
+      await updateJobProgress(jobId, { text, done, total });
     },
     shouldCancel: () => isChatJobCancelled(jobId),
   });
@@ -407,6 +502,82 @@ async function runBrevoToAttioJob(job: {
   });
 }
 
+async function runCampaignToAttioOnceJob(job: {
+  _id: unknown;
+  userId: unknown;
+  projectId: unknown;
+  chatId: unknown;
+  args?: Record<string, unknown>;
+}) {
+  const jobId = String(job._id);
+  const args = (job.args || {}) as Record<string, unknown>;
+  const sourceProvider = String(args.sourceProvider || "").toLowerCase() as
+    | "lemlist"
+    | "brevo"
+    | "other";
+  const campaignName = String(args.campaignName || args.campaign || "").trim();
+  const attioList = String(args.attioList || args.list || "").trim();
+  if (!campaignName) throw new Error("Campaign name missing on this job");
+  if (!attioList) throw new Error("Attio list missing on this job");
+  if (sourceProvider !== "lemlist" && sourceProvider !== "brevo" && sourceProvider !== "other") {
+    throw new Error(`Unsupported source: ${sourceProvider}`);
+  }
+
+  const { syncCampaignToAttioOnce } = await import("@/lib/automations");
+  const result = await syncCampaignToAttioOnce({
+    userId: String(job.userId),
+    projectId: String(job.projectId),
+    sourceProvider,
+    sourceIntegrationName: String(args.sourceIntegrationName || "").trim() || undefined,
+    campaignName,
+    attioList,
+    stageOpen: String(args.stageOpen || "Open"),
+    stageClick: String(args.stageClick || "Click"),
+    realEngagement:
+      args.realEngagement === true ||
+      args.real_engagement === true ||
+      String(args.realEngagement || args.real_engagement || "").toLowerCase() === "true",
+    onStatus: async (text, done, total) => {
+      if (isChatJobCancelled(jobId)) throw new Error("Stopped by user");
+      await updateJobProgress(jobId, { text, done, total });
+    },
+  });
+
+  if (isChatJobCancelled(jobId)) {
+    await updateJob(jobId, {
+      status: "stopped",
+      lastSummary: "Stopped by user",
+      error: "Stopped by user",
+      finishedAt: new Date(),
+    });
+    return;
+  }
+
+  const content = [
+    `**One-time campaign sync finished**`,
+    result.summary,
+    `Campaign status: **${result.campaignStatus}** · Stages: Prospect / Open / Click`,
+  ].join("\n");
+
+  const saved = await postJobMessage({
+    userId: String(job.userId),
+    projectId: String(job.projectId),
+    chatId: String(job.chatId),
+    content,
+    toolsUsed: ["sync_campaign_to_attio"],
+    jobId,
+  });
+
+  await updateJob(jobId, {
+    status: "completed",
+    lastSummary: result.summary,
+    result,
+    error: "",
+    finishedAt: new Date(),
+    resultMessageId: saved?._id,
+  });
+}
+
 async function postJobMessage(input: {
   userId: string;
   projectId: string;
@@ -430,6 +601,33 @@ async function postJobMessage(input: {
 
 export async function processDueChatJobs(limit = 3) {
   await dbConnect();
+
+  // Reclaim jobs stuck in "running" after a crash / hot-reload / hung request.
+  const stallCutoff = new Date(Date.now() - 90_000);
+  const stalled = await ChatJob.find({
+    status: "running",
+    $or: [{ startedAt: { $lte: stallCutoff } }, { startedAt: { $exists: false } }],
+  })
+    .select("_id")
+    .lean();
+  const gLocks = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
+  for (const item of stalled) {
+    gLocks.__nexusesChatJobLocks?.delete(String(item._id));
+  }
+  if (stalled.length) {
+    await ChatJob.updateMany(
+      { _id: { $in: stalled.map((item) => item._id) } },
+      {
+        $set: {
+          status: "queued",
+          lastSummary: "Retrying after stall…",
+          nextRunAt: new Date(),
+          error: "",
+        },
+      },
+    );
+  }
+
   const due = await ChatJob.find({
     status: "queued",
     nextRunAt: { $lte: new Date() },
@@ -439,6 +637,9 @@ export async function processDueChatJobs(limit = 3) {
 
   const out: ChatJobDTO[] = [];
   for (const job of due) {
+    // Clear stale in-memory lock so reclaim works in the same process.
+    const g = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
+    g.__nexusesChatJobLocks?.delete(String(job._id));
     const updated = await processChatJobById(String(job._id));
     if (updated) out.push(updated);
   }
@@ -446,8 +647,19 @@ export async function processDueChatJobs(limit = 3) {
 }
 
 export function ensureChatJobRunner() {
-  const g = globalThis as unknown as { __nexusesChatJobTimer?: NodeJS.Timeout };
-  if (g.__nexusesChatJobTimer) return;
+  const g = globalThis as unknown as {
+    __nexusesChatJobTimer?: NodeJS.Timeout;
+    __nexusesChatJobRunnerVersion?: number;
+  };
+  const RUNNER_VERSION = 3; // bump when job types / handlers change
+  if (g.__nexusesChatJobTimer && g.__nexusesChatJobRunnerVersion === RUNNER_VERSION) {
+    return;
+  }
+  if (g.__nexusesChatJobTimer) {
+    clearInterval(g.__nexusesChatJobTimer);
+    g.__nexusesChatJobTimer = undefined;
+  }
+  g.__nexusesChatJobRunnerVersion = RUNNER_VERSION;
   g.__nexusesChatJobTimer = setInterval(() => {
     void processDueChatJobs().catch(() => undefined);
   }, 10_000);

@@ -1,5 +1,6 @@
 import type { AuthType } from "@/types/chat";
 import { findKnownCustomApi } from "@/lib/known-custom-apis";
+import { applyRealEngagementUnifiedPeople } from "@/lib/engagement-filter";
 
 export const UNIFIED_PORTAL_BASE = "https://unified.nexuses.xyz";
 
@@ -26,15 +27,30 @@ export function unifiedPortalHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-async function requestJson(url: string, init: RequestInit) {
-  const res = await fetch(url, { ...init, cache: "no-store" });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 500)}`);
-  if (!text) return null;
+async function requestJson(url: string, init: RequestInit, timeoutMs = 90_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return JSON.parse(text);
-  } catch {
-    return text;
+    const res = await fetch(url, {
+      ...init,
+      cache: "no-store",
+      signal: init.signal || controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 500)}`);
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Unified Portal request timed out after ${Math.round(timeoutMs / 1000)}s: ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -43,6 +59,9 @@ type PortalCampaign = {
   name?: string;
   kind?: string;
   status?: string;
+  subject?: string;
+  subjectLine?: string;
+  emailSubject?: string;
   opens?: number;
   clicks?: number;
   recipients?: number;
@@ -57,6 +76,9 @@ type PortalRecipient = {
   openedAt?: string;
   clickedAt?: string;
   unsubscribedAt?: string;
+  deliveredAt?: string;
+  sentAt?: string;
+  sendAt?: string;
 };
 
 function asCampaigns(data: unknown): PortalCampaign[] {
@@ -106,11 +128,15 @@ export async function resolveUnifiedPortalCampaign(
           .includes(campaignName.toLowerCase()),
       );
     if (match?.id) {
+      const subject = String(
+        match.subject || match.subjectLine || match.emailSubject || "",
+      ).trim();
       return {
         id: String(match.id),
         name: String(match.name || campaignName),
         kind: (match.kind || kind) as "drip" | "oneone",
         status: String(match.status || "").toLowerCase(),
+        subject,
         opens: Number(match.opens) || 0,
         clicks: Number(match.clicks) || 0,
         recipients: Number(match.recipients) || 0,
@@ -158,8 +184,41 @@ async function fetchRecipients(
     await requestJson(
       `${base}/api/campaigns/${encodeURIComponent(campaignId)}/recipients?filter=${filter}&kind=${kind}`,
       { headers },
+      120_000,
     ),
   );
+}
+
+export type UnifiedSyncPerson = {
+  email: string;
+  name: string;
+  stage: string;
+  sentAt?: string;
+  openedAt?: string;
+  clickedAt?: string;
+};
+
+function pickTime(person: PortalRecipient, keys: (keyof PortalRecipient)[]) {
+  for (const key of keys) {
+    const value = String(person[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+/** Soft-fail helper so one slow Portal filter cannot kill the whole Attio sync. */
+async function fetchRecipientsSafe(
+  apiKey: string,
+  baseUrl: string | undefined,
+  campaignId: string,
+  kind: string,
+  filter: "audience" | "delivered" | "opens" | "clicks" | "unsubscribes",
+) {
+  try {
+    return await fetchRecipients(apiKey, baseUrl, campaignId, kind, filter);
+  } catch {
+    return [] as PortalRecipient[];
+  }
 }
 
 export async function collectUnifiedPortalPeople(input: {
@@ -167,55 +226,92 @@ export async function collectUnifiedPortalPeople(input: {
   baseUrl?: string;
   campaignId: string;
   kind: string;
+  stageProspect?: string;
   stageOpen: string;
   stageClick: string;
   stageReply?: string;
+  /** When true, only count open/click ≥45s after send/delivery. */
+  realEngagement?: boolean;
 }) {
-  const [opens, clicks, unsubs] = await Promise.all([
-    fetchRecipients(input.apiKey, input.baseUrl, input.campaignId, input.kind, "opens"),
-    fetchRecipients(input.apiKey, input.baseUrl, input.campaignId, input.kind, "clicks"),
-    fetchRecipients(input.apiKey, input.baseUrl, input.campaignId, input.kind, "unsubscribes"),
+  const stageProspect = input.stageProspect || "Prospect";
+  // Prospect / Open / Click only — skip unsubscribes (Portal often hangs on that filter).
+  const [delivered, opens, clicks] = await Promise.all([
+    fetchRecipientsSafe(input.apiKey, input.baseUrl, input.campaignId, input.kind, "delivered").then(
+      async (rows) => {
+        if (rows.length) return rows;
+        return fetchRecipientsSafe(
+          input.apiKey,
+          input.baseUrl,
+          input.campaignId,
+          input.kind,
+          "audience",
+        );
+      },
+    ),
+    fetchRecipientsSafe(input.apiKey, input.baseUrl, input.campaignId, input.kind, "opens"),
+    fetchRecipientsSafe(input.apiKey, input.baseUrl, input.campaignId, input.kind, "clicks"),
   ]);
 
-  const byEmail = new Map<string, { email: string; name: string; stage: string }>();
-  for (const person of opens) {
+  const byEmail = new Map<string, UnifiedSyncPerson>();
+
+  const upsert = (
+    person: PortalRecipient,
+    stage: string,
+    patch: Partial<UnifiedSyncPerson>,
+  ) => {
     const email = String(person.email || "")
       .trim()
       .toLowerCase();
-    if (!email.includes("@")) continue;
+    if (!email.includes("@")) return;
+    const existing = byEmail.get(email);
+    const name = String(person.fullName || existing?.name || "").trim();
     byEmail.set(email, {
       email,
-      name: String(person.fullName || "").trim(),
-      stage: input.stageOpen,
+      name,
+      stage,
+      sentAt:
+        patch.sentAt ||
+        existing?.sentAt ||
+        pickTime(person, ["deliveredAt", "sentAt", "sendAt"]),
+      openedAt: patch.openedAt || existing?.openedAt || pickTime(person, ["openedAt"]),
+      clickedAt: patch.clickedAt || existing?.clickedAt || pickTime(person, ["clickedAt"]),
+    });
+  };
+
+  for (const person of delivered) {
+    upsert(person, stageProspect, {
+      sentAt: pickTime(person, ["deliveredAt", "sentAt", "sendAt"]),
+    });
+  }
+  for (const person of opens) {
+    upsert(person, input.stageOpen, {
+      openedAt: pickTime(person, ["openedAt"]),
     });
   }
   for (const person of clicks) {
-    const email = String(person.email || "")
-      .trim()
-      .toLowerCase();
-    if (!email.includes("@")) continue;
-    byEmail.set(email, {
-      email,
-      name: String(person.fullName || "").trim(),
-      stage: input.stageClick,
+    upsert(person, input.stageClick, {
+      clickedAt: pickTime(person, ["clickedAt"]),
+      openedAt: pickTime(person, ["openedAt"]),
     });
   }
-  // Unsubscribes stay as click/open if already present; otherwise mark open stage label "unsubscribed" only if stageReply used as hot — keep simple: use stageReply or "unsubscribed"
-  for (const person of unsubs) {
-    const email = String(person.email || "")
-      .trim()
-      .toLowerCase();
-    if (!email.includes("@")) continue;
-    byEmail.set(email, {
-      email,
-      name: String(person.fullName || "").trim(),
-      stage: input.stageReply || "unsubscribed",
+
+  let people = [...byEmail.values()];
+  if (input.realEngagement) {
+    people = applyRealEngagementUnifiedPeople(people, {
+      prospect: stageProspect,
+      open: input.stageOpen,
+      click: input.stageClick,
     });
   }
 
   return {
-    people: [...byEmail.values()],
-    counts: { opens: opens.length, clicks: clicks.length, unsubscribed: unsubs.length },
+    people,
+    counts: {
+      delivered: delivered.length,
+      opens: opens.length,
+      clicks: clicks.length,
+      unsubscribed: 0,
+    },
   };
 }
 

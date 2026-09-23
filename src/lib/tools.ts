@@ -1230,6 +1230,46 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
     {
       type: "function",
       function: {
+        name: "sync_campaign_to_attio",
+        description:
+          "Sync one campaign into an Attio list with stages Prospect / Open / Click. mode=inspect → return campaign status only (completed vs running). mode=once → enqueue a BACKGROUND one-time import (for completed campaigns — NOT a live automation). mode=automation → start a live automation (ONLY after the user confirms the campaign is still running). Never use mode=automation for completed campaigns.",
+        parameters: {
+          type: "object",
+          properties: {
+            mode: {
+              type: "string",
+              enum: ["inspect", "once", "automation"],
+              description: "inspect | once (background job) | automation (live)",
+            },
+            source: {
+              type: "string",
+              description: "lemlist | brevo | other — or the custom integration name",
+            },
+            integration: {
+              type: "string",
+              description: "Custom connector name when source is other (e.g. Unified Portal)",
+            },
+            campaign: { type: "string", description: "Campaign name" },
+            attio_list: {
+              type: "string",
+              description: "Attio list name (required for once/automation)",
+            },
+            stage_open: { type: "string", description: 'Default "Open"' },
+            stage_click: { type: "string", description: 'Default "Click"' },
+            real_engagement: {
+              type: "boolean",
+              description:
+                "When true, only count opens/clicks at least 45 seconds after send/delivery (real engagement). Ask the user Yes/No during Sync → Attio before mode=once or mode=automation.",
+            },
+          },
+          required: ["mode", "source", "campaign"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "start_campaign_automation",
         description:
           "Start a background sync that keeps pushing people/stages into an Attio list. Works for Lemlist, Brevo, Unified Portal, Nexuses Outreach 1-1, SmartLead (webhooks for sent/open/click), AND other custom APIs. SmartLead: API lacks reliable open/click/sent — start with SmartLead integration + attio_list; bot returns webhook_url to paste in SmartLead (enable EMAIL_SENT, EMAIL_OPEN, EMAIL_LINK_CLICK). Unified watch-all: watch_all true or campaign \"*\".",
@@ -1254,9 +1294,22 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               type: "string",
               description: "Attio list/pipeline name to update",
             },
-            stage_open: { type: "string", description: "Attio stage for opens / default. Default open." },
-            stage_click: { type: "string", description: "Attio stage for clicks (Lemlist). Default click." },
-            stage_reply: { type: "string", description: "Attio stage for replies (Lemlist). Default hot." },
+            stage_open: {
+              type: "string",
+              description: 'Attio stage for opens. Always "Open" for Sync campaign → Attio.',
+            },
+            stage_click: {
+              type: "string",
+              description: 'Attio stage for clicks. Always "Click" for Sync campaign → Attio.',
+            },
+            stage_reply: {
+              type: "string",
+              description: "Attio stage for replies (Lemlist). Prefer Open/Click sync only; default hot if needed.",
+            },
+            stage_prospect: {
+              type: "string",
+              description: 'Attio stage for sent/delivered. Always "Prospect" for Sync campaign → Attio.',
+            },
             interval_minutes: {
               type: "number",
               description: "How often to sync while running. Default 2.",
@@ -1363,7 +1416,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_create_list",
           description:
-            "Create an Attio list/pipeline and optionally add kanban stages. Use this whenever the user asks to create a list, board, or pipeline in Attio. Example: name 'Nexuses bot', stages prospect, open, click, hot.",
+            "Create an Attio list/pipeline and add kanban stages. For Sync campaign → Attio always use stages Prospect, Open, Click (exactly those three, in that order).",
           parameters: {
             type: "object",
             properties: {
@@ -1371,7 +1424,8 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               stages: {
                 type: "array",
                 items: { type: "string" },
-                description: "Pipeline stages in order, e.g. prospect, open, click, hot",
+                description:
+                  'Pipeline stages in order. For campaign sync use ["Prospect","Open","Click"] only.',
               },
               parent_object: {
                 type: "string",
@@ -1388,7 +1442,7 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
         function: {
           name: "attio_import_to_list",
           description:
-            "Import people from attached CSV/Excel into an Attio list. Writes ALL useful CSV columns onto People (job title, LinkedIn, website/company, custom fields — creates missing People attributes when needed). Supports one campaign as 3 files (delivered/opened/clicked) or one combined file. Stages default Prospect / Open / Clicks. Use ONCE. Background + Attio 429 retries. Do not invent counts.",
+            "Import people from attached CSV/Excel into an Attio list. Writes ALL useful CSV columns onto People (job title, LinkedIn, website/company, custom fields — creates missing People attributes when needed). Supports one campaign as 3 files (delivered/opened/clicked) or one combined file. Stages default Prospect / Opens / Clicks. Set real_engagement=true to only count opens/clicks ≥45s after send. Use ONCE. Background + Attio 429 retries. Do not invent counts.",
           parameters: {
             type: "object",
             properties: {
@@ -1401,7 +1455,16 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
               map_engagement: {
                 type: "boolean",
                 description:
-                  "Map engagement to stages (clicked→Clicks, opened→Open, delivered/sent→Prospect). Auto-on for campaign exports and single all-in-one engagement files.",
+                  "Map engagement to stages (clicked→Clicks, opened→Opens, delivered/sent→Prospect). Auto-on for campaign exports and single all-in-one engagement files.",
+              },
+              real_engagement: {
+                type: "boolean",
+                description:
+                  "When true, only treat opens/clicks as real if they happened at least 45 seconds after Send_Date (filters instant/bot opens). Default false.",
+              },
+              real_seconds: {
+                type: "number",
+                description: "Minimum seconds after send for a real open/click. Default 45.",
               },
               csv: {
                 type: "string",
@@ -2207,6 +2270,130 @@ export async function runTool(
     });
   }
 
+  if (name === "sync_campaign_to_attio") {
+    if (!context.userId || !context.projectId) {
+      throw new Error("Cannot sync campaign in this context");
+    }
+    const mode = String(args.mode || "inspect").trim().toLowerCase();
+    const rawSource = String(args.source || args.provider || "").trim();
+    const lower = rawSource.toLowerCase();
+    const integrationArg = String(
+      args.integration || args.integration_name || args.sourceIntegrationName || "",
+    ).trim();
+    const campaign = String(args.campaign || args.campaignName || "").trim();
+    if (!campaign) throw new Error("Campaign name is required");
+
+    let sourceProvider: "lemlist" | "brevo" | "other";
+    let sourceIntegrationName = "";
+    if (lower === "lemlist") sourceProvider = "lemlist";
+    else if (lower === "brevo") sourceProvider = "brevo";
+    else {
+      sourceProvider = "other";
+      sourceIntegrationName =
+        integrationArg ||
+        (lower && lower !== "other" && lower !== "custom" ? rawSource : "");
+      if (!sourceIntegrationName) {
+        throw new Error("For custom connectors pass integration (e.g. Unified Portal)");
+      }
+      const matched = integrations.find(
+        (item) =>
+          item.provider === "other" &&
+          item.name.toLowerCase() === sourceIntegrationName.toLowerCase(),
+      );
+      if (!matched) {
+        throw new Error(`No custom API named "${sourceIntegrationName}" is connected`);
+      }
+      sourceIntegrationName = matched.name;
+    }
+
+    const {
+      inspectCampaignForAttioSync,
+      startCampaignAutomation,
+      ensureAutomationRunner,
+    } = await import("@/lib/automations");
+    const { ensureChatJobRunner, enqueueCampaignToAttioOnce } = await import("@/lib/chat-jobs");
+
+    if (mode === "inspect") {
+      context.onStatus?.(`Checking status for ${campaign}…`);
+      const info = await inspectCampaignForAttioSync({
+        userId: context.userId,
+        projectId: context.projectId,
+        sourceProvider,
+        sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
+        campaignName: campaign,
+      });
+      return clip({
+        ok: true,
+        ...info,
+        next: info.isCompleted
+          ? 'Campaign is completed — after real-engagement Yes/No, call sync_campaign_to_attio with mode="once" (background job). Do NOT start an automation.'
+          : 'Campaign is still running — after real-engagement Yes/No, ASK automation with :::choices: "Yes — keep syncing automatically" / "No — one-time sync only". Only then call mode=automation or mode=once with real_engagement true/false.',
+      });
+    }
+
+    const attioList = String(args.attio_list || args.attioList || args.list || "").trim();
+    if (!attioList) throw new Error("Attio list name is required");
+    const stageOpen = String(args.stage_open || args.stageOpen || "Open");
+    const stageClick = String(args.stage_click || args.stageClick || "Click");
+    const realEngagement =
+      args.real_engagement === true ||
+      args.realEngagement === true ||
+      String(args.real_engagement || args.realEngagement || "").toLowerCase() === "true";
+
+    if (mode === "once") {
+      if (!context.chatId) throw new Error("Chat context required for background sync");
+      ensureChatJobRunner();
+      context.onStatus?.(`Queuing one-time sync for ${campaign}…`);
+      const job = await enqueueCampaignToAttioOnce({
+        userId: context.userId,
+        projectId: context.projectId,
+        chatId: context.chatId,
+        sourceProvider,
+        sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
+        campaignName: campaign,
+        attioList,
+        stageOpen,
+        stageClick,
+        realEngagement,
+      });
+      context.onChatJob?.(job);
+      return clip({
+        ok: true,
+        mode: "once",
+        background: true,
+        job,
+        real_engagement: realEngagement,
+        note: `Background one-time sync started for completed/current data → Attio “${attioList}” (Prospect / Open / Click${realEngagement ? "; real opens/clicks ≥45s after send" : ""}). Tell the user it is a background task, not a live automation. A result posts when finished.`,
+      });
+    }
+
+    if (mode === "automation") {
+      ensureAutomationRunner();
+      context.onStatus?.(`Starting live automation for ${campaign}…`);
+      const automation = await startCampaignAutomation({
+        userId: context.userId,
+        projectId: context.projectId,
+        sourceProvider,
+        sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
+        campaignName: campaign,
+        attioList,
+        stageOpen,
+        stageClick,
+        stageReply: "Open",
+        realEngagement,
+        intervalMinutes: 2,
+      });
+      return clip({
+        ok: true,
+        mode: "automation",
+        automation,
+        note: `Live automation started: ${campaign} → Attio “${attioList}” (Prospect / Open / Click). New opens/clicks will keep syncing until the campaign completes or the user stops it.`,
+      });
+    }
+
+    throw new Error('mode must be "inspect", "once", or "automation"');
+  }
+
   if (name === "start_campaign_automation") {
     if (!context.userId || !context.projectId) {
       throw new Error("Cannot start automation in this context");
@@ -2339,9 +2526,9 @@ export async function runTool(
       sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : undefined,
       campaignName: campaign || (watchAll ? "*" : ""),
       attioList,
-      stageOpen: String(args.stage_open || args.stageOpen || "open"),
-      stageClick: String(args.stage_click || args.stageClick || "click"),
-      stageReply: String(args.stage_reply || args.stageReply || "hot"),
+      stageOpen: String(args.stage_open || args.stageOpen || "Open"),
+      stageClick: String(args.stage_click || args.stageClick || "Click"),
+      stageReply: String(args.stage_reply || args.stageReply || "Open"),
       intervalMinutes: Number(args.interval_minutes || args.intervalMinutes) || 2,
       recipe,
       watchAll,

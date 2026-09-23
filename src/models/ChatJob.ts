@@ -7,7 +7,7 @@ const ChatJobSchema = new Schema(
     chatId: { type: Schema.Types.ObjectId, ref: "Chat", required: true, index: true },
     type: {
       type: String,
-      enum: ["attio_csv_import", "brevo_to_attio"],
+      enum: ["attio_csv_import", "brevo_to_attio", "campaign_to_attio_once"],
       default: "attio_csv_import",
     },
     status: {
@@ -36,4 +36,9 @@ const ChatJobSchema = new Schema(
 ChatJobSchema.index({ projectId: 1, status: 1, nextRunAt: 1 });
 ChatJobSchema.index({ chatId: 1, status: 1 });
 
-export const ChatJob = models.ChatJob || model("ChatJob", ChatJobSchema);
+// Next.js HMR can keep a stale model without newer enum values — refresh it.
+if (models.ChatJob) {
+  delete models.ChatJob;
+}
+
+export const ChatJob = model("ChatJob", ChatJobSchema);

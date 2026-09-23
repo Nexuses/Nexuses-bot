@@ -14,6 +14,7 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { IntegrationsPanel } from "@/components/IntegrationsPanel";
 import { AutomationsPanel } from "@/components/AutomationsPanel";
 import type { AutomationDTO } from "@/lib/serialize-automation";
+import { CHAT_RECIPES } from "@/lib/recipes";
 import type { ChatAttachment, ChatMessageDTO, ChatThreadDTO, IntegrationDTO } from "@/types/chat";
 import type { ProjectDTO, SessionUser } from "@/types";
 
@@ -538,9 +539,9 @@ export function ProjectChat({
     void refreshChatJobs();
   }
 
-  async function send(event?: FormEvent) {
+  async function send(event?: FormEvent, overrideText?: string) {
     event?.preventDefault();
-    const text = input.trim();
+    const text = (overrideText ?? input).trim();
     if ((!text && !files.length) || busy) return;
     setError("");
     const pending = files;
@@ -857,34 +858,32 @@ export function ProjectChat({
       </header>
 
       {activeJobs.length ? (
-        <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-3 sm:px-6">
+        <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-2 sm:px-6">
           <div className="mx-auto flex max-w-4xl flex-col gap-2">
             {activeJobs.map((job) => (
               <div
                 key={job._id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sea/40 bg-sea/10 px-4 py-3"
+                className="flex items-center gap-3 rounded-xl border border-sea/40 bg-sea/10 px-3 py-2"
               >
-                <div className="min-w-0">
-                  <p className="flex items-center gap-2 text-sm font-medium text-paper">
-                    <span
-                      className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
-                      aria-hidden
-                    />
-                    Background task running
-                  </p>
-                  <p className="mt-1 truncate text-xs text-muted">
-                    {job.lastSummary || job.title}
-                    {job.progressTotal
-                      ? ` · ${job.progressDone.toLocaleString()}/${job.progressTotal.toLocaleString()}`
+                <span
+                  className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-sea"
+                  aria-hidden
+                />
+                <p className="min-w-0 flex-1 truncate text-sm text-paper">
+                  <span className="font-medium">Background task</span>
+                  <span className="text-muted">
+                    {job.progressTotal > 0
+                      ? ` · ${Math.min(job.progressDone, job.progressTotal).toLocaleString()}/${job.progressTotal.toLocaleString()}`
                       : ""}
-                    {" · "}keeps running until complete
-                  </p>
-                </div>
+                    {" · "}
+                    {job.lastSummary || job.title}
+                  </span>
+                </p>
                 <button
                   type="button"
                   disabled={stoppingId === job._id}
                   onClick={() => void stopActiveChatJob(job._id)}
-                  className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
+                  className="shrink-0 rounded-full border border-line px-3 py-1 text-xs text-muted hover:border-sea hover:text-paper disabled:opacity-50"
                 >
                   {stoppingId === job._id ? "Stopping…" : "Stop"}
                 </button>
@@ -895,7 +894,10 @@ export function ProjectChat({
       ) : null}
 
       <main className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col overflow-hidden px-4 sm:px-6">
-        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-8">
+        <div
+          ref={listRef}
+          className="min-h-0 flex-1 overflow-y-auto py-8 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+        >
           <div className="space-y-5">
           {messages.length === 0 && !busy ? (
             <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
@@ -906,25 +908,22 @@ export function ProjectChat({
                 className="mb-6 h-16 w-auto max-w-[220px] object-contain"
               />
               <h1 className="font-display text-4xl tracking-tight">Ask Nexuses.</h1>
-              <p className="mt-3 max-w-md text-muted">
-                Tell me what to do, or attach a CSV, Excel, PDF, text file, or screenshot. I will read it
-                and finish the task.
+              <p className="mt-3 max-w-lg text-muted">
+                Connect Attio + campaign tools, sync opens/clicks into lists, import CSVs, or
+                build reports. Pick a recipe — I will ask a few questions with options you can
+                tap.
               </p>
-              <div className="mt-6 flex flex-wrap justify-center gap-2">
-                {[
-                  "Connect Attio with this API key",
-                  "Create an Attio list named Nexuses bot with stages prospect, open, click, hot",
-                  "Find a contact",
-                  "What can you do?",
-                ].map((prompt) => (
+              <div className="mt-8 grid w-full max-w-2xl gap-3 sm:grid-cols-1">
+                {CHAT_RECIPES.map((recipe) => (
                   <button
-                    key={prompt}
-                    onClick={() => {
-                      setInput(prompt);
-                    }}
-                    className="rounded-full border border-line px-4 py-2 text-sm text-muted hover:border-sea hover:text-paper"
+                    key={recipe.id}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void send(undefined, recipe.start)}
+                    className="rounded-2xl border border-line bg-panel px-5 py-4 text-left transition hover:border-sea"
                   >
-                    {prompt}
+                    <div className="font-semibold text-paper">{recipe.title}</div>
+                    <div className="mt-1 text-sm text-muted">{recipe.blurb}</div>
                   </button>
                 ))}
               </div>
@@ -956,6 +955,13 @@ export function ProjectChat({
                       projectId={project._id}
                       clientLogoUrl={project.logo}
                       clientName={project.name}
+                      onChoice={
+                        busy
+                          ? undefined
+                          : (choice) => {
+                              void send(undefined, choice);
+                            }
+                      }
                     />
                   )}
                 </div>

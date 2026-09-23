@@ -164,6 +164,43 @@ function domainFromEmail(email: string) {
   return host;
 }
 
+/** True when a string is clearly an email (must never be written into Attio Name). */
+export function looksLikeEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+/** Split a display name; rejects blank / email-like values. */
+export function splitPersonName(raw?: string | null) {
+  const cleaned = String(raw || "").trim();
+  if (!cleaned || looksLikeEmail(cleaned)) {
+    return { first: "", last: "", full: "" };
+  }
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  const first = parts[0] || "";
+  const last = parts.slice(1).join(" ");
+  return { first, last, full: cleaned };
+}
+
+/**
+ * Attio `name` attribute payload — omit entirely when we only have an email
+ * so imports/syncs do not overwrite Name with the address.
+ */
+export function attioNameValues(raw?: string | null): {
+  name?: Array<{ first_name: string; last_name: string; full_name: string }>;
+} {
+  const { first, last, full } = splitPersonName(raw);
+  if (!full && !first) return {};
+  return {
+    name: [
+      {
+        first_name: first || full,
+        last_name: last,
+        full_name: full || [first, last].filter(Boolean).join(" "),
+      },
+    ],
+  };
+}
+
 type RequestJson = (url: string, init: RequestInit) => Promise<unknown>;
 
 async function listPeopleAttributes(apiKey: string, requestJson: RequestJson) {

@@ -1,3 +1,4 @@
+import { attioNameValues } from "@/lib/attio-person-fields";
 import { exportBrevoCampaignRecipientsFull } from "@/lib/brevo-recipients";
 
 const ATTIO = "https://api.attio.com";
@@ -81,20 +82,63 @@ async function ensureListStages(
   stageSlug: string,
   stages: string[],
 ) {
+  let existing: string[] = [];
+  try {
+    const data = (await requestJson(
+      `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
+      { headers: attioHeaders(apiKey) },
+    )) as { data?: Array<{ title?: string }> };
+    existing = (data.data || []).map((item) => String(item.title || "").trim()).filter(Boolean);
+  } catch {
+    existing = [];
+  }
+
   for (const stage of stages) {
+    const desired = String(stage || "").trim();
+    if (!desired) continue;
+    if (existing.some((title) => title.toLowerCase() === desired.toLowerCase())) continue;
     try {
       await requestJson(
         `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
         {
           method: "POST",
           headers: attioHeaders(apiKey),
-          body: JSON.stringify({ data: { title: stage } }),
+          body: JSON.stringify({ data: { title: desired } }),
         },
       );
+      existing.push(desired);
     } catch {
       // already exists
     }
   }
+}
+
+/** Map desired stage names onto existing Attio titles without creating duplicates (case-insensitive). */
+async function resolveStageTitles(
+  apiKey: string,
+  listId: string,
+  stageSlug: string,
+  stages: string[],
+): Promise<Record<string, string>> {
+  await ensureListStages(apiKey, listId, stageSlug, stages);
+  let existing: string[] = [];
+  try {
+    const data = (await requestJson(
+      `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
+      { headers: attioHeaders(apiKey) },
+    )) as { data?: Array<{ title?: string }> };
+    existing = (data.data || []).map((item) => String(item.title || "").trim()).filter(Boolean);
+  } catch {
+    existing = [];
+  }
+  const out: Record<string, string> = {};
+  for (const stage of stages) {
+    const desired = String(stage || "").trim();
+    if (!desired) continue;
+    const match = existing.find((title) => title.toLowerCase() === desired.toLowerCase());
+    out[desired] = match || desired;
+  }
+  return out;
 }
 
 async function resolveAttioList(apiKey: string, listName: string) {
@@ -137,8 +181,6 @@ async function upsertPersonWithStage(
   if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email) || email.includes(";") || email.includes(" ")) {
     throw new Error(`Invalid email address: ${email.slice(0, 80)}`);
   }
-  const [first = "", ...rest] = (person.name || "").split(/\s+/);
-  const last = rest.join(" ");
   const created = await requestJson(
     `${ATTIO}/v2/objects/people/records?matching_attribute=email_addresses`,
     {
@@ -148,13 +190,7 @@ async function upsertPersonWithStage(
         data: {
           values: {
             email_addresses: [{ email_address: email }],
-            name: [
-              {
-                first_name: first || email,
-                last_name: last,
-                full_name: person.name || email,
-              },
-            ],
+            ...attioNameValues(person.name),
           },
         },
       }),
@@ -232,7 +268,11 @@ export async function importBrevoCampaignsToAttio(input: {
 
   await input.onStatus?.(`Looking up Attio list “${input.attioList}”…`);
   const list = await resolveAttioList(input.attioApiKey, input.attioList.trim());
-  await ensureListStages(input.attioApiKey, list.id, list.stageSlug, stageOrder);
+  const titles = await resolveStageTitles(input.attioApiKey, list.id, list.stageSlug, stageOrder);
+  const stageProspectResolved = titles[stageProspect] || stageProspect;
+  const stageOpenResolved = titles[stageOpen] || stageOpen;
+  const stageClickResolved = titles[stageClick] || stageClick;
+  const stageOrderResolved = [stageProspectResolved, stageOpenResolved, stageClickResolved];
 
   const merged = new Map<string, Person>();
   const perCampaign: Array<{
@@ -301,16 +341,16 @@ export async function importBrevoCampaignsToAttio(input: {
             });
             continue;
           }
-          existing.stage = pickHigherStage(existing.stage, stage, stageOrder);
+          existing.stage = pickHigherStage(existing.stage, stage, stageOrderResolved);
           if (person.name && !existing.name) existing.name = person.name;
           if (!existing.campaigns.includes(campaignName)) existing.campaigns.push(campaignName);
         }
       };
 
       const campaignName = all.campaignName || campaign;
-      apply(all.people, stageProspect, campaignName);
-      apply(opens.people, stageOpen, campaignName);
-      apply(clicks.people, stageClick, campaignName);
+      apply(all.people, stageProspectResolved, campaignName);
+      apply(opens.people, stageOpenResolved, campaignName);
+      apply(clicks.people, stageClickResolved, campaignName);
     } catch (err) {
       const message = err instanceof Error ? err.message : "export failed";
       campaignErrors.push(`${campaign}: ${message}`);
@@ -375,9 +415,9 @@ export async function importBrevoCampaignsToAttio(input: {
   });
 
   const byStage: Record<string, number> = {
-    [stageProspect]: 0,
-    [stageOpen]: 0,
-    [stageClick]: 0,
+    [stageProspectResolved]: 0,
+    [stageOpenResolved]: 0,
+    [stageClickResolved]: 0,
   };
   for (const person of people) {
     byStage[person.stage] = (byStage[person.stage] || 0) + 1;

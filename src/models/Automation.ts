@@ -33,6 +33,8 @@ const AutomationSchema = new Schema(
     recipe: { type: Schema.Types.Mixed, default: undefined },
     /** Watch all Unified Portal campaigns (updatedSince + webhooks). */
     watchAll: { type: Boolean, default: false },
+    /** Only stage open/click when activity is ≥45s after send/delivery (Unified Portal + CSV). */
+    realEngagement: { type: Boolean, default: false },
     lastSeenAt: { type: Date },
     webhookToken: { type: String, default: "", index: true },
     webhookSecret: { type: String, default: "" },

@@ -5,6 +5,7 @@ import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { enhanceSharedHtml } from "@/lib/html-dashboard-kit";
+import { extractChoiceBlocks } from "@/lib/recipes";
 
 type Branding = {
   projectId?: string;
@@ -532,15 +533,34 @@ export function ChatMarkdown({
   projectId,
   clientLogoUrl,
   clientName,
+  onChoice,
 }: {
   content: string;
   projectId?: string;
   clientLogoUrl?: string;
   clientName?: string;
+  onChoice?: (choice: string) => void;
 }) {
-  const prepared = repairMarkdownTables(unwrap(content));
+  const { markdown, choices } = extractChoiceBlocks(unwrap(content));
+  const prepared = repairMarkdownTables(markdown);
   const standalone = extractStandaloneHtml(prepared);
   const branding = { projectId, clientLogoUrl, clientName };
+
+  const choiceRow =
+    choices.length > 0 && onChoice ? (
+      <div className="mt-4 flex flex-wrap gap-2">
+        {choices.slice(0, 12).map((choice) => (
+          <button
+            key={choice}
+            type="button"
+            onClick={() => onChoice(choice)}
+            className="rounded-full border border-line bg-ink-2 px-4 py-2 text-left text-sm text-paper hover:border-sea hover:text-sea"
+          >
+            {choice}
+          </button>
+        ))}
+      </div>
+    ) : null;
 
   if (standalone) {
     return (
@@ -555,6 +575,7 @@ export function ChatMarkdown({
               <code className="font-mono text-[13px]">{standalone}</code>
             </pre>
           </div>
+          {choiceRow}
         </div>
       </BrandingContext.Provider>
     );
@@ -563,9 +584,12 @@ export function ChatMarkdown({
   return (
     <BrandingContext.Provider value={branding}>
       <div className="chat-md">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-          {prepared}
-        </ReactMarkdown>
+        {prepared ? (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+            {prepared}
+          </ReactMarkdown>
+        ) : null}
+        {choiceRow}
       </div>
     </BrandingContext.Provider>
   );

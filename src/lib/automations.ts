@@ -1,3 +1,4 @@
+import { attioNameValues } from "@/lib/attio-person-fields";
 import { dbConnect } from "@/lib/db";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
 import { callBrevoMcpTool, listBrevoMcpTools } from "@/lib/brevo-mcp";
@@ -48,6 +49,7 @@ const LEMLIST = "https://api.lemlist.com";
 type StoredKey = {
   apiKey: string;
   mcpUrl?: string;
+  restApiKey?: string;
 };
 
 type CustomIntegration = {
@@ -109,16 +111,51 @@ function withQueryApiKey(url: string, apiKey: string) {
   return parsed.toString();
 }
 
-async function requestJson(url: string, init: RequestInit) {
-  const res = await fetch(url, { ...init, cache: "no-store" });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 500)}`);
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
+async function requestJson(url: string, init: RequestInit, retries = 6) {
+  let lastError = "";
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90_000);
+    try {
+      const res = await fetch(url, {
+        ...init,
+        cache: "no-store",
+        signal: init.signal || controller.signal,
+      });
+      const text = await res.text();
+      if (res.status === 429 || res.status === 503) {
+        lastError = `${res.status} ${res.statusText}: ${text.slice(0, 400)}`;
+        const retryAfterRaw = res.headers.get("retry-after");
+        const retryAfterSec = retryAfterRaw ? Number(retryAfterRaw) : NaN;
+        const waitMs =
+          Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? Math.min(60_000, retryAfterSec * 1000)
+            : Math.min(30_000, 1000 * 2 ** attempt);
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 500)}`);
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        lastError = `Request timed out: ${url}`;
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        throw new Error(lastError);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw new Error(lastError || `Request failed: ${url}`);
 }
 
 function asObjects(data: unknown): Record<string, unknown>[] {
@@ -178,7 +215,7 @@ async function getIntegration(
   await dbConnect();
   const doc = await Integration.findOne({ userId, projectId, provider }).lean();
   if (!doc?.apiKey) throw new Error(`${provider} is not connected`);
-  return { apiKey: doc.apiKey, mcpUrl: doc.mcpUrl || "" };
+  return { apiKey: doc.apiKey, mcpUrl: doc.mcpUrl || "", restApiKey: doc.restApiKey || "" };
 }
 
 async function getCustomIntegration(
@@ -258,15 +295,306 @@ async function resolveAttioList(apiKey: string, listName: string) {
   };
 }
 
+async function listExistingStageTitles(
+  apiKey: string,
+  listId: string,
+  stageSlug: string,
+): Promise<string[]> {
+  try {
+    const data = (await requestJson(
+      `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
+      { headers: attioHeaders(apiKey) },
+    )) as { data?: Array<{ title?: string; status?: { title?: string } }> };
+    return (data.data || [])
+      .map((item) => String(item.title || item.status?.title || "").trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Prefer existing Attio stage titles case-insensitively (Open == open).
+ * Only create a stage when no case-insensitive match exists.
+ * Returns map: desiredLower -> exact Attio title to write.
+ */
+async function ensureListStages(
+  apiKey: string,
+  listId: string,
+  stageSlug: string,
+  stages: string[],
+): Promise<Map<string, string>> {
+  const existing = await listExistingStageTitles(apiKey, listId, stageSlug);
+  const canonical = new Map<string, string>();
+
+  for (const stage of stages) {
+    const desired = String(stage || "").trim();
+    if (!desired) continue;
+    const key = desired.toLowerCase();
+    const match = existing.find((title) => title.toLowerCase() === key);
+    if (match) {
+      canonical.set(key, match);
+      continue;
+    }
+    try {
+      await requestJson(
+        `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/attributes/${encodeURIComponent(stageSlug)}/statuses`,
+        {
+          method: "POST",
+          headers: attioHeaders(apiKey),
+          body: JSON.stringify({ data: { title: desired } }),
+        },
+      );
+      existing.push(desired);
+      canonical.set(key, desired);
+    } catch {
+      // Race / already exists — re-read once
+      const refreshed = await listExistingStageTitles(apiKey, listId, stageSlug);
+      const again = refreshed.find((title) => title.toLowerCase() === key);
+      canonical.set(key, again || desired);
+      for (const title of refreshed) {
+        if (!existing.some((e) => e.toLowerCase() === title.toLowerCase())) {
+          existing.push(title);
+        }
+      }
+    }
+  }
+  return canonical;
+}
+
+function resolveStageTitle(canonical: Map<string, string>, stage: string) {
+  const desired = String(stage || "").trim();
+  if (!desired) return "";
+  return canonical.get(desired.toLowerCase()) || desired;
+}
+
+function formatWhen(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function buildCampaignNotes(input: {
+  campaignName: string;
+  subject?: string;
+  stage: string;
+  sentAt?: string;
+  openedAt?: string;
+  clickedAt?: string;
+}) {
+  const campaign = input.campaignName;
+  const subject = input.subject ? `Subject: ${input.subject}` : "";
+  const stageLower = input.stage.toLowerCase();
+  const isOpen = Boolean(input.openedAt) || /open/.test(stageLower);
+  const isClick = Boolean(input.clickedAt) || /click/.test(stageLower);
+  const notes: Array<{ title: string; content: string; kind: "sent" | "opened" | "clicked" }> =
+    [];
+
+  // 1) Campaign / sent details — once per campaign
+  notes.push({
+    kind: "sent",
+    title: `Sent · ${campaign}`.slice(0, 200),
+    content: [
+      `Campaign: ${campaign}`,
+      subject,
+      input.sentAt
+        ? `Sent to this contact: ${formatWhen(input.sentAt)}`
+        : "Sent to this contact (synced from campaign).",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+
+  // 2) Open note — only if they opened
+  if (isOpen) {
+    notes.push({
+      kind: "opened",
+      title: `Opened · ${campaign}`.slice(0, 200),
+      content: [
+        `Campaign: ${campaign}`,
+        subject,
+        input.openedAt
+          ? `Contact opened the email: ${formatWhen(input.openedAt)}`
+          : "Contact opened the email (synced from campaign).",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+  }
+
+  // 3) Click note — only if they clicked
+  if (isClick) {
+    notes.push({
+      kind: "clicked",
+      title: `Clicked · ${campaign}`.slice(0, 200),
+      content: [
+        `Campaign: ${campaign}`,
+        subject,
+        input.clickedAt
+          ? `Contact clicked a link: ${formatWhen(input.clickedAt)}`
+          : "Contact clicked a link (synced from campaign).",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+  }
+
+  return notes;
+}
+
+type ExistingNotes = {
+  titles: Set<string>;
+  bodies: string[];
+  ok: boolean;
+};
+
+async function listPersonNotes(apiKey: string, recordId: string): Promise<ExistingNotes> {
+  try {
+    const data = (await requestJson(
+      `${ATTIO}/v2/notes?parent_object=people&parent_record_id=${encodeURIComponent(recordId)}&limit=50`,
+      { headers: attioHeaders(apiKey) },
+    )) as {
+      data?: Array<{ title?: string; content_plaintext?: string }>;
+    };
+    const rows = data.data || [];
+    return {
+      ok: true,
+      titles: new Set(
+        rows.map((item) => String(item.title || "").trim().toLowerCase()).filter(Boolean),
+      ),
+      bodies: rows.map((item) => String(item.content_plaintext || "").toLowerCase()),
+    };
+  } catch {
+    // If we cannot read notes, do NOT create more (avoids duplicate spam).
+    return { ok: false, titles: new Set(), bodies: [] };
+  }
+}
+
+function campaignNoteAlreadyExists(
+  existing: ExistingNotes,
+  campaignName: string,
+  kind: "sent" | "opened" | "clicked",
+  title: string,
+) {
+  const titleKey = title.trim().toLowerCase();
+  if (existing.titles.has(titleKey)) return true;
+
+  const campaign = campaignName.trim().toLowerCase();
+  if (!campaign) return false;
+
+  for (const t of existing.titles) {
+    if (!t.includes(campaign)) continue;
+    if (kind === "sent" && (t.startsWith("sent") || t.startsWith("campaign:"))) return true;
+    if (kind === "opened" && t.startsWith("opened")) return true;
+    if (kind === "clicked" && t.startsWith("clicked")) return true;
+  }
+
+  for (const body of existing.bodies) {
+    if (!body.includes(campaign)) continue;
+    // Old combined notes ended with "Synced by Nexuses · …" — treat as already written.
+    if (kind === "sent" && (body.includes("synced by nexuses") || body.includes("sent to"))) {
+      return true;
+    }
+    if (kind === "opened" && (body.includes("opened:") || body.includes("opened the email"))) {
+      return true;
+    }
+    if (kind === "clicked" && (body.includes("clicked:") || body.includes("clicked a link"))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function createAttioNote(
+  apiKey: string,
+  recordId: string,
+  note: { title: string; content: string },
+) {
+  await requestJson(`${ATTIO}/v2/notes`, {
+    method: "POST",
+    headers: attioHeaders(apiKey),
+    body: JSON.stringify({
+      data: {
+        parent_object: "people",
+        parent_record_id: recordId,
+        title: note.title.slice(0, 200),
+        format: "plaintext",
+        content: note.content.slice(0, 8000),
+      },
+    }),
+  });
+}
+
+/** Create Sent / Opened / Clicked notes only when missing — never re-add on every sync. */
+async function ensureCampaignNotes(
+  apiKey: string,
+  recordId: string,
+  campaignName: string,
+  notes: Array<{ title: string; content: string; kind: "sent" | "opened" | "clicked" }>,
+) {
+  if (!notes.length) return 0;
+  const existing = await listPersonNotes(apiKey, recordId);
+  if (!existing.ok) return 0;
+
+  let created = 0;
+  for (const note of notes) {
+    if (campaignNoteAlreadyExists(existing, campaignName, note.kind, note.title)) continue;
+    try {
+      await createAttioNote(apiKey, recordId, note);
+      existing.titles.add(note.title.trim().toLowerCase());
+      existing.bodies.push(note.content.toLowerCase());
+      created += 1;
+    } catch {
+      // Notes require note:read-write — don't fail the whole sync
+    }
+  }
+  return created;
+}
+
+async function mapPool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  let next = 0;
+  const runners = Array.from(
+    { length: Math.min(Math.max(concurrency, 1), items.length || 1) },
+    async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        await worker(items[index], index);
+      }
+    },
+  );
+  await Promise.all(runners);
+}
+
 async function upsertAttioPerson(
   apiKey: string,
   listId: string,
   stageSlug: string,
-  person: { email: string; name?: string },
-  stage: string,
+  person: {
+    email: string;
+    name?: string;
+    stage: string;
+    campaignName?: string;
+    notes?: Array<{
+      title: string;
+      content: string;
+      kind: "sent" | "opened" | "clicked";
+    }> | null;
+  },
 ) {
-  const [first = "", ...rest] = (person.name || "").split(/\s+/);
-  const last = rest.join(" ");
   const created = await requestJson(
     `${ATTIO}/v2/objects/people/records?matching_attribute=email_addresses`,
     {
@@ -276,13 +604,7 @@ async function upsertAttioPerson(
         data: {
           values: {
             email_addresses: [{ email_address: person.email }],
-            name: [
-              {
-                first_name: first || person.email,
-                last_name: last,
-                full_name: person.name || person.email,
-              },
-            ],
+            ...attioNameValues(person.name),
           },
         },
       }),
@@ -292,35 +614,52 @@ async function upsertAttioPerson(
     (created as { data?: { id?: { record_id?: string } } })?.data?.id?.record_id || "";
   if (!recordId) throw new Error(`Could not upsert ${person.email}`);
 
-  const payloads = [
-    {
-      parent_record_id: recordId,
-      parent_object: "people",
-      entry_values: stage ? { [stageSlug]: stage } : {},
-    },
-    {
-      parent_record_id: recordId,
-      parent_object: "people",
-      entry_values: stage ? { [stageSlug]: [{ status: stage }] } : {},
-    },
-  ];
-  for (const data of payloads) {
-    try {
+  const stage = String(person.stage || "").trim();
+  if (stage) {
+    const payloads = [
+      {
+        parent_record_id: recordId,
+        parent_object: "people",
+        entry_values: { [stageSlug]: stage },
+      },
+      {
+        parent_record_id: recordId,
+        parent_object: "people",
+        entry_values: { [stageSlug]: [{ status: stage }] },
+      },
+    ];
+    let listed = false;
+    for (const data of payloads) {
+      try {
+        await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
+          method: "PUT",
+          headers: attioHeaders(apiKey),
+          body: JSON.stringify({ data }),
+        });
+        listed = true;
+        break;
+      } catch {
+        // try next shape
+      }
+    }
+    if (!listed) {
       await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-        method: "PUT",
+        method: "POST",
         headers: attioHeaders(apiKey),
-        body: JSON.stringify({ data }),
+        body: JSON.stringify({ data: payloads[0] }),
       });
-      return;
-    } catch {
-      // try next shape
     }
   }
-  await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-    method: "POST",
-    headers: attioHeaders(apiKey),
-    body: JSON.stringify({ data: payloads[0] }),
-  });
+
+  if (person.notes?.length) {
+    await ensureCampaignNotes(
+      apiKey,
+      recordId,
+      person.campaignName || "",
+      person.notes,
+    );
+  }
+  return recordId;
 }
 
 async function syncLemlistCampaign(job: {
@@ -357,7 +696,7 @@ async function syncLemlistCampaign(job: {
   let failed = 0;
   for (const person of byEmail.values()) {
     try {
-      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
       updated += 1;
     } catch {
       failed += 1;
@@ -412,7 +751,7 @@ async function syncBrevoCampaign(job: {
   let updated = 0;
   for (const email of unique) {
     try {
-      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { email }, job.stageOpen);
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { email, stage: job.stageOpen });
       updated += 1;
     } catch {
       // continue
@@ -556,6 +895,9 @@ async function syncUnifiedPortalSource(job: {
   watchAll?: boolean;
   lastSeenAt?: Date | null;
   recipe?: SyncRecipe | null;
+  oneShot?: boolean;
+  realEngagement?: boolean;
+  onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const integration = await getCustomIntegration(
     job.userId,
@@ -564,6 +906,9 @@ async function syncUnifiedPortalSource(job: {
   );
   const attio = await getIntegration(job.userId, job.projectId, "attio");
   const list = await resolveAttioList(attio.apiKey, job.attioList);
+  const stageOpen = job.stageOpen || "Open";
+  const stageClick = job.stageClick || "Click";
+  const stageProspect = "Prospect";
 
   if (job.watchAll || job.campaignName === "*" || /^all$/i.test(job.campaignName)) {
     const dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
@@ -589,13 +934,13 @@ async function syncUnifiedPortalSource(job: {
         baseUrl: integration.baseUrl,
         campaignId: campaign.id,
         kind: campaign.kind,
-        stageOpen: job.stageOpen || "open",
-        stageClick: job.stageClick || "click",
+        stageOpen,
+        stageClick,
         stageReply: job.stageReply || "unsubscribed",
       });
       for (const person of people.slice(0, 500)) {
         try {
-          await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+          await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
           updated += 1;
         } catch {
           failed += 1;
@@ -611,13 +956,18 @@ async function syncUnifiedPortalSource(job: {
     };
   }
 
-  // Keep portal sends moving even when nobody has the report page open.
-  const dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
+  // Live automations keep portal sends moving; one-shot completed syncs skip this (it often hangs).
+  let dueRounds = 0;
+  if (!job.oneShot) {
+    await job.onStatus?.(`Driving Unified Portal process-due…`);
+    dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
+  }
 
   const kindHint =
     job.recipe?.campaignKind === "drip" || job.recipe?.campaignKind === "oneone"
       ? job.recipe.campaignKind
       : undefined;
+  await job.onStatus?.(`Lookup “${job.campaignName}”…`);
   const campaign = await resolveUnifiedPortalCampaign(
     integration.apiKey,
     integration.baseUrl,
@@ -625,32 +975,82 @@ async function syncUnifiedPortalSource(job: {
     kindHint,
   );
 
+  await job.onStatus?.(`Stages on “${list.name}”…`);
+  const stageMap = await ensureListStages(attio.apiKey, list.id, list.stageSlug, [
+    stageProspect,
+    stageOpen,
+    stageClick,
+  ]);
+  const prospectTitle = resolveStageTitle(stageMap, stageProspect);
+  const openTitle = resolveStageTitle(stageMap, stageOpen);
+  const clickTitle = resolveStageTitle(stageMap, stageClick);
+
+  await job.onStatus?.(`Fetch recipients · ${campaign.name}…`);
   const { people, counts } = await collectUnifiedPortalPeople({
     apiKey: integration.apiKey,
     baseUrl: integration.baseUrl,
     campaignId: campaign.id,
     kind: campaign.kind,
-    stageOpen: job.stageOpen || "open",
-    stageClick: job.stageClick || "click",
+    stageProspect: prospectTitle,
+    stageOpen: openTitle,
+    stageClick: clickTitle,
     stageReply: job.stageReply || "unsubscribed",
+    realEngagement: Boolean(job.realEngagement),
   });
+
+  if (!people.length) {
+    return {
+      completed: campaignLooksCompleted(campaign.status),
+      campaignStatus: campaign.status || "running",
+      summary: `Unified Portal · ${campaign.name}: no recipients returned (delivered ${counts.delivered}, opens ${counts.opens}, clicks ${counts.clicks}). Nothing written to Attio.`,
+    };
+  }
 
   let updated = 0;
   let failed = 0;
-  for (const person of people.slice(0, 500)) {
-    try {
-      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
-      updated += 1;
-    } catch {
-      failed += 1;
-    }
-  }
+  let notesWritten = 0;
+  let firstError = "";
+  const batch = people.slice(0, job.oneShot ? 8000 : 5000);
+  await job.onStatus?.(`Writing to Attio…`, 0, batch.length);
 
-  const completed = campaign.status === "sent";
+  const subject = String(campaign.subject || "").trim();
+  await mapPool(batch, job.oneShot ? 4 : 3, async (person) => {
+    const stage = resolveStageTitle(stageMap, person.stage) || person.stage;
+    const notes = buildCampaignNotes({
+      campaignName: campaign.name,
+      subject,
+      stage,
+      sentAt: person.sentAt,
+      openedAt: person.openedAt,
+      clickedAt: person.clickedAt,
+    });
+    try {
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, {
+        email: person.email,
+        name: person.name,
+        stage,
+        campaignName: campaign.name,
+        notes,
+      });
+      updated += 1;
+      notesWritten += 1;
+    } catch (err) {
+      failed += 1;
+      if (!firstError) {
+        firstError = err instanceof Error ? err.message : "Attio write failed";
+      }
+    }
+    const done = updated + failed;
+    if (done % 25 === 0 || done === batch.length) {
+      await job.onStatus?.(`Writing to Attio…`, done, batch.length);
+    }
+  });
+
+  const completed = campaignLooksCompleted(campaign.status);
   return {
     completed,
     campaignStatus: campaign.status || "running",
-    summary: `Unified Portal · ${campaign.name} (${campaign.kind}): process-due ×${dueRounds}; synced ${updated} to ${list.name} (${counts.opens} opens, ${counts.clicks} clicks, ${counts.unsubscribed} unsubs)${failed ? `; ${failed} failed` : ""}. Status: ${campaign.status || "unknown"}.`,
+    summary: `Unified Portal · ${campaign.name}: synced **${updated}** → **${list.name}** (notes: Sent / Opened / Clicked, no duplicates${job.realEngagement ? "; real opens/clicks ≥45s after send" : ""})${failed ? `; ${failed} failed` : ""}${firstError ? `. ${firstError}` : ""}`,
   };
 }
 
@@ -691,7 +1091,7 @@ async function syncOutreachSource(job: {
   let failed = 0;
   for (const person of people.slice(0, 500)) {
     try {
-      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
       updated += 1;
     } catch {
       failed += 1;
@@ -720,6 +1120,9 @@ async function syncRecipeSource(job: {
   watchAll?: boolean;
   lastSeenAt?: Date | null;
   recipe: SyncRecipe | null | undefined;
+  oneShot?: boolean;
+  realEngagement?: boolean;
+  onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const integration = await getCustomIntegration(
     job.userId,
@@ -735,11 +1138,14 @@ async function syncRecipeSource(job: {
       campaignName: job.campaignName,
       attioList: job.attioList,
       stageOpen: job.stageOpen,
-      stageClick: job.stageClick || "click",
+      stageClick: job.stageClick || "Click",
       stageReply: job.stageReply || "unsubscribed",
       watchAll: job.watchAll || job.recipe?.watchAll,
       lastSeenAt: job.lastSeenAt,
       recipe: job.recipe,
+      oneShot: job.oneShot,
+      realEngagement: job.realEngagement,
+      onStatus: job.onStatus,
     });
   }
 
@@ -776,7 +1182,7 @@ async function syncRecipeSource(job: {
   let failed = 0;
   for (const person of people) {
     try {
-      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
       updated += 1;
     } catch {
       failed += 1;
@@ -835,6 +1241,7 @@ export async function runAutomationById(automationId: string) {
         watchAll: Boolean(job.watchAll),
         lastSeenAt: job.lastSeenAt || null,
         recipe: job.recipe as SyncRecipe | undefined,
+        realEngagement: Boolean(job.realEngagement),
       });
     }
 
@@ -900,6 +1307,174 @@ export function ensureAutomationRunner() {
     .catch(() => undefined);
 }
 
+export function campaignLooksCompleted(status: string) {
+  return /^(ended|done|completed|archived|sent|finished|closed|inactive)$/i.test(
+    String(status || "").trim(),
+  );
+}
+
+export function campaignLooksRunning(status: string) {
+  const s = String(status || "").trim().toLowerCase();
+  if (!s) return true;
+  if (campaignLooksCompleted(s)) return false;
+  return /^(scheduled|sending|running|active|paused|auto_paused|in[_ -]?progress|live|draft)$/i.test(
+    s,
+  )
+    ? true
+    : !campaignLooksCompleted(s);
+}
+
+/** One-shot sync (not a live automation). Used for completed campaigns / background chat jobs. */
+export async function syncCampaignToAttioOnce(input: {
+  userId: string;
+  projectId: string;
+  sourceProvider: "lemlist" | "brevo" | "other";
+  sourceIntegrationName?: string;
+  campaignName: string;
+  attioList: string;
+  stageOpen?: string;
+  stageClick?: string;
+  stageReply?: string;
+  realEngagement?: boolean;
+  onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
+}) {
+  const stageOpen = input.stageOpen || "Open";
+  const stageClick = input.stageClick || "Click";
+  const stageReply = input.stageReply || "Open";
+  await input.onStatus?.(
+    `One-time sync · ${input.campaignName} → ${input.attioList}`,
+  );
+
+  if (input.sourceProvider === "lemlist") {
+    return syncLemlistCampaign({
+      userId: input.userId,
+      projectId: input.projectId,
+      campaignName: input.campaignName,
+      attioList: input.attioList,
+      stageOpen,
+      stageClick,
+      stageReply,
+    });
+  }
+  if (input.sourceProvider === "brevo") {
+    // Prefer full Brevo export path for richer Prospect/Open/Click coverage.
+    const [attio, brevo] = await Promise.all([
+      getIntegration(input.userId, input.projectId, "attio"),
+      getIntegration(input.userId, input.projectId, "brevo"),
+    ]);
+    const { importBrevoCampaignsToAttio } = await import("@/lib/brevo-attio-import");
+    const result = await importBrevoCampaignsToAttio({
+      attioApiKey: attio.apiKey,
+      brevoApiKey: brevo.apiKey,
+      brevoRestApiKey: brevo.restApiKey || undefined,
+      brevoMcpUrl: brevo.mcpUrl || undefined,
+      campaigns: [input.campaignName],
+      attioList: input.attioList,
+      stageProspect: "Prospect",
+      stageOpen,
+      stageClick,
+      onStatus: input.onStatus,
+    });
+    return {
+      completed: true,
+      campaignStatus: "completed",
+      summary: `Brevo → Attio “${result.list}”: imported ${result.imported} contacts (Prospect/Open/Click).`,
+    };
+  }
+
+  const integrationName = String(input.sourceIntegrationName || "").trim();
+  if (!integrationName) {
+    throw new Error("Custom source requires sourceIntegrationName");
+  }
+  return syncRecipeSource({
+    userId: input.userId,
+    projectId: input.projectId,
+    sourceIntegrationName: integrationName,
+    campaignName: input.campaignName,
+    attioList: input.attioList,
+    stageOpen,
+    stageClick,
+    stageReply,
+    watchAll: false,
+    lastSeenAt: null,
+    recipe: undefined,
+    oneShot: true,
+    realEngagement: input.realEngagement,
+    onStatus: input.onStatus,
+  });
+}
+
+/** Resolve campaign status without writing to Attio. */
+export async function inspectCampaignForAttioSync(input: {
+  userId: string;
+  projectId: string;
+  sourceProvider: "lemlist" | "brevo" | "other";
+  sourceIntegrationName?: string;
+  campaignName: string;
+}) {
+  if (input.sourceProvider === "lemlist") {
+    const lemlist = await getIntegration(input.userId, input.projectId, "lemlist");
+    const campaign = await resolveLemlistCampaign(lemlist.apiKey, input.campaignName);
+    const status = campaign.status || "running";
+    return {
+      campaign: campaign.name,
+      status,
+      isCompleted: campaignLooksCompleted(status),
+      isRunning: campaignLooksRunning(status),
+    };
+  }
+  if (input.sourceProvider === "brevo") {
+    // Brevo list tool already exposes status; treat unknown as completed-friendly one-shot.
+    return {
+      campaign: input.campaignName,
+      status: "unknown",
+      isCompleted: false,
+      isRunning: true,
+      note: "Confirm from brevo_list_campaigns status (sent = completed).",
+    };
+  }
+  const integration = await getCustomIntegration(
+    input.userId,
+    input.projectId,
+    String(input.sourceIntegrationName || ""),
+  );
+  if (isUnifiedPortal(integration)) {
+    const campaign = await resolveUnifiedPortalCampaign(
+      integration.apiKey,
+      integration.baseUrl,
+      input.campaignName,
+    );
+    const status = campaign.status || "running";
+    return {
+      campaign: campaign.name,
+      status,
+      isCompleted: campaignLooksCompleted(status),
+      isRunning: campaignLooksRunning(status),
+    };
+  }
+  if (isNexusesOutreach(integration)) {
+    const campaign = await resolveOutreachCampaign(
+      integration.apiKey,
+      integration.baseUrl,
+      input.campaignName,
+    );
+    const status = campaign.status || "running";
+    return {
+      campaign: campaign.name,
+      status,
+      isCompleted: campaignLooksCompleted(status) || status === "completed",
+      isRunning: !campaignLooksCompleted(status) && status !== "completed",
+    };
+  }
+  return {
+    campaign: input.campaignName,
+    status: "unknown",
+    isCompleted: false,
+    isRunning: true,
+    note: "Could not read status from this connector — ask the user, or default to one-time sync.",
+  };
+}
+
 export async function startCampaignAutomation(input: {
   userId: string;
   projectId: string;
@@ -910,6 +1485,7 @@ export async function startCampaignAutomation(input: {
   stageOpen?: string;
   stageClick?: string;
   stageReply?: string;
+  realEngagement?: boolean;
   intervalMinutes?: number;
   recipe?: SyncRecipe | null;
   watchAll?: boolean;
@@ -1061,15 +1637,16 @@ export async function startCampaignAutomation(input: {
     sourceIntegrationName: sourceProvider === "other" ? sourceIntegrationName : "",
     campaignName,
     attioList: input.attioList.trim(),
-    stageOpen: input.stageOpen || "open",
-    stageClick: input.stageClick || "click",
-    stageReply: input.stageReply || "hot",
+    stageOpen: input.stageOpen || "Open",
+    stageClick: input.stageClick || "Click",
+    stageReply: input.stageReply || "Open",
     intervalMinutes: Math.min(
       Math.max(input.intervalMinutes || defaultInterval, 1),
       60,
     ),
     recipe: sourceProvider === "other" ? recipe : undefined,
     watchAll,
+    realEngagement: Boolean(input.realEngagement),
     lastSeenAt: watchAll ? new Date() : undefined,
     webhookToken,
     webhookSecret,
@@ -1183,7 +1760,7 @@ export async function handleUnifiedWebhookToken(input: {
     });
     for (const person of people) {
       try {
-        await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+        await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
         updated += 1;
       } catch {
         // continue
@@ -1204,7 +1781,7 @@ export async function handleUnifiedWebhookToken(input: {
       });
       for (const person of people.slice(0, 500)) {
         try {
-          await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, person, person.stage);
+          await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
           updated += 1;
         } catch {
           // continue
@@ -1243,10 +1820,10 @@ export async function handleSmartleadWebhookToken(input: {
 
   const normalized = normalizeSmartleadEvent(payload);
   const stage = stageFromSmartleadEvent(normalized.rawType, {
-    open: job.stageOpen || "open",
-    click: job.stageClick || "click",
-    reply: job.stageReply || "hot",
-    sent: "sent",
+    open: job.stageOpen || "Open",
+    click: job.stageClick || "Click",
+    reply: job.stageReply || "Open",
+    sent: "Prospect",
   });
 
   if (!stage) {
@@ -1273,8 +1850,7 @@ export async function handleSmartleadWebhookToken(input: {
       attio.apiKey,
       list.id,
       list.stageSlug,
-      { email: normalized.email, name: normalized.name },
-      stage,
+      { email: normalized.email, name: normalized.name, stage },
     );
   } catch (err) {
     job.lastRunAt = new Date();
