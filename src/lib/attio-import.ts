@@ -669,7 +669,7 @@ export async function runAttioCsvImportFromText(input: {
   args: Record<string, unknown>;
   csvText: string;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
-  shouldCancel?: () => boolean;
+  shouldCancel?: () => boolean | Promise<boolean>;
 }): Promise<AttioImportResult> {
   const listName = String(input.args.list || input.args.list_name || input.args.listName || "").trim();
   if (!listName) throw new Error("List name is required");
@@ -812,7 +812,7 @@ export async function runAttioCsvImportFromText(input: {
 
   // Attio rate-limits ~heavily under parallel PUTs — keep concurrency low and retry 429s.
   await mapPool(rows, 2, async (row) => {
-    if (input.shouldCancel?.()) {
+    if (input.shouldCancel && (await Promise.resolve(input.shouldCancel()))) {
       throw new Error("Stopped by user");
     }
     await sleep(120);

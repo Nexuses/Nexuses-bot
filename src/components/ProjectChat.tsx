@@ -305,15 +305,25 @@ export function ProjectChat({
   async function stopActiveChatJob(jobId: string) {
     setStoppingId(jobId);
     setError("");
+    setChatJobs((current) => current.filter((job) => job._id !== jobId));
     try {
-      await fetch(`/api/projects/${project._id}/chat-jobs`, {
+      const res = await fetch(`/api/projects/${project._id}/chat-jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop", chatId: activeChatId || undefined }),
+        body: JSON.stringify({
+          action: "stop",
+          jobId,
+          chatId: activeChatId || undefined,
+        }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || "Could not stop task");
+      }
       await refreshChatJobs();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not stop task");
+      await refreshChatJobs();
     } finally {
       setStoppingId("");
     }

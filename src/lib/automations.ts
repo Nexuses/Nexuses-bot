@@ -564,14 +564,22 @@ async function mapPool<T>(
   items: T[],
   concurrency: number,
   worker: (item: T, index: number) => Promise<void>,
+  shouldCancel?: () => boolean | Promise<boolean>,
 ) {
+  const stopErr = () => new Error("Stopped by user");
   let next = 0;
   const runners = Array.from(
     { length: Math.min(Math.max(concurrency, 1), items.length || 1) },
     async () => {
       while (next < items.length) {
+        if (shouldCancel && (await Promise.resolve(shouldCancel()))) {
+          throw stopErr();
+        }
         const index = next;
         next += 1;
+        if (shouldCancel && (await Promise.resolve(shouldCancel()))) {
+          throw stopErr();
+        }
         await worker(items[index], index);
       }
     },
@@ -670,6 +678,7 @@ async function syncLemlistCampaign(job: {
   stageOpen: string;
   stageClick: string;
   stageReply: string;
+  shouldCancel?: () => boolean | Promise<boolean>;
 }) {
   const lemlist = await getIntegration(job.userId, job.projectId, "lemlist");
   const attio = await getIntegration(job.userId, job.projectId, "attio");
@@ -695,6 +704,9 @@ async function syncLemlistCampaign(job: {
   let updated = 0;
   let failed = 0;
   for (const person of byEmail.values()) {
+    if (job.shouldCancel && (await Promise.resolve(job.shouldCancel()))) {
+      throw new Error("Stopped by user");
+    }
     try {
       await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, { ...person, stage: person.stage });
       updated += 1;
@@ -897,6 +909,7 @@ async function syncUnifiedPortalSource(job: {
   recipe?: SyncRecipe | null;
   oneShot?: boolean;
   realEngagement?: boolean;
+  shouldCancel?: () => boolean | Promise<boolean>;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const integration = await getCustomIntegration(
@@ -909,6 +922,11 @@ async function syncUnifiedPortalSource(job: {
   const stageOpen = job.stageOpen || "Open";
   const stageClick = job.stageClick || "Click";
   const stageProspect = "Prospect";
+  const throwIfStopped = async () => {
+    if (job.shouldCancel && (await Promise.resolve(job.shouldCancel()))) {
+      throw new Error("Stopped by user");
+    }
+  };
 
   if (job.watchAll || job.campaignName === "*" || /^all$/i.test(job.campaignName)) {
     const dueRounds = await driveUnifiedPortalProcessDue(integration.apiKey, integration.baseUrl, 8);
@@ -967,6 +985,7 @@ async function syncUnifiedPortalSource(job: {
     job.recipe?.campaignKind === "drip" || job.recipe?.campaignKind === "oneone"
       ? job.recipe.campaignKind
       : undefined;
+  await throwIfStopped();
   await job.onStatus?.(`Lookup “${job.campaignName}”…`);
   const campaign = await resolveUnifiedPortalCampaign(
     integration.apiKey,
@@ -975,6 +994,7 @@ async function syncUnifiedPortalSource(job: {
     kindHint,
   );
 
+  await throwIfStopped();
   await job.onStatus?.(`Stages on “${list.name}”…`);
   const stageMap = await ensureListStages(attio.apiKey, list.id, list.stageSlug, [
     stageProspect,
@@ -985,6 +1005,7 @@ async function syncUnifiedPortalSource(job: {
   const openTitle = resolveStageTitle(stageMap, stageOpen);
   const clickTitle = resolveStageTitle(stageMap, stageClick);
 
+  await throwIfStopped();
   await job.onStatus?.(`Fetch recipients · ${campaign.name}…`);
   const { people, counts } = await collectUnifiedPortalPeople({
     apiKey: integration.apiKey,
@@ -1014,37 +1035,42 @@ async function syncUnifiedPortalSource(job: {
   await job.onStatus?.(`Writing to Attio…`, 0, batch.length);
 
   const subject = String(campaign.subject || "").trim();
-  await mapPool(batch, job.oneShot ? 4 : 3, async (person) => {
-    const stage = resolveStageTitle(stageMap, person.stage) || person.stage;
-    const notes = buildCampaignNotes({
-      campaignName: campaign.name,
-      subject,
-      stage,
-      sentAt: person.sentAt,
-      openedAt: person.openedAt,
-      clickedAt: person.clickedAt,
-    });
-    try {
-      await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, {
-        email: person.email,
-        name: person.name,
-        stage,
+  await mapPool(
+    batch,
+    job.oneShot ? 4 : 3,
+    async (person) => {
+      const stage = resolveStageTitle(stageMap, person.stage) || person.stage;
+      const notes = buildCampaignNotes({
         campaignName: campaign.name,
-        notes,
+        subject,
+        stage,
+        sentAt: person.sentAt,
+        openedAt: person.openedAt,
+        clickedAt: person.clickedAt,
       });
-      updated += 1;
-      notesWritten += 1;
-    } catch (err) {
-      failed += 1;
-      if (!firstError) {
-        firstError = err instanceof Error ? err.message : "Attio write failed";
+      try {
+        await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, {
+          email: person.email,
+          name: person.name,
+          stage,
+          campaignName: campaign.name,
+          notes,
+        });
+        updated += 1;
+        notesWritten += 1;
+      } catch (err) {
+        failed += 1;
+        if (!firstError) {
+          firstError = err instanceof Error ? err.message : "Attio write failed";
+        }
       }
-    }
-    const done = updated + failed;
-    if (done % 25 === 0 || done === batch.length) {
-      await job.onStatus?.(`Writing to Attio…`, done, batch.length);
-    }
-  });
+      const done = updated + failed;
+      if (done % 5 === 0 || done === batch.length) {
+        await job.onStatus?.(`Writing to Attio…`, done, batch.length);
+      }
+    },
+    job.shouldCancel,
+  );
 
   const completed = campaignLooksCompleted(campaign.status);
   return {
@@ -1122,6 +1148,7 @@ async function syncRecipeSource(job: {
   recipe: SyncRecipe | null | undefined;
   oneShot?: boolean;
   realEngagement?: boolean;
+  shouldCancel?: () => boolean | Promise<boolean>;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const integration = await getCustomIntegration(
@@ -1145,6 +1172,7 @@ async function syncRecipeSource(job: {
       recipe: job.recipe,
       oneShot: job.oneShot,
       realEngagement: job.realEngagement,
+      shouldCancel: job.shouldCancel,
       onStatus: job.onStatus,
     });
   }
@@ -1336,6 +1364,7 @@ export async function syncCampaignToAttioOnce(input: {
   stageClick?: string;
   stageReply?: string;
   realEngagement?: boolean;
+  shouldCancel?: () => boolean | Promise<boolean>;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const stageOpen = input.stageOpen || "Open";
@@ -1354,6 +1383,7 @@ export async function syncCampaignToAttioOnce(input: {
       stageOpen,
       stageClick,
       stageReply,
+      shouldCancel: input.shouldCancel,
     });
   }
   if (input.sourceProvider === "brevo") {
@@ -1374,6 +1404,7 @@ export async function syncCampaignToAttioOnce(input: {
       stageOpen,
       stageClick,
       onStatus: input.onStatus,
+      shouldCancel: input.shouldCancel,
     });
     return {
       completed: true,
@@ -1400,6 +1431,7 @@ export async function syncCampaignToAttioOnce(input: {
     recipe: undefined,
     oneShot: true,
     realEngagement: input.realEngagement,
+    shouldCancel: input.shouldCancel,
     onStatus: input.onStatus,
   });
 }

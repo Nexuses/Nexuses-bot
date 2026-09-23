@@ -214,6 +214,7 @@ async function updateJobProgress(
   await ChatJob.updateOne(
     {
       _id: id,
+      status: { $nin: ["stopped"] },
       $or: [{ progressDone: { $lte: done } }, { progressDone: { $exists: false } }, { progressDone: null }],
     },
     {
@@ -327,29 +328,20 @@ async function runAttioCsvImportJob(job: {
   }).lean();
   if (!attio?.apiKey) throw new Error("Attio is not connected");
 
+  const shouldStop = createChatJobStopChecker(jobId);
   const { runAttioCsvImportFromText } = await import("@/lib/attio-import");
   const result = await runAttioCsvImportFromText({
     apiKey: attio.apiKey,
     args: (job.args || {}) as Record<string, unknown>,
     csvText,
     onStatus: async (text, done, total) => {
-      if (isChatJobCancelled(jobId)) {
-        throw new Error("Stopped by user");
-      }
+      if (await shouldStop()) throw new Error("Stopped by user");
       await updateJobProgress(jobId, { text, done, total });
     },
-    shouldCancel: () => isChatJobCancelled(jobId),
+    shouldCancel: shouldStop,
   });
 
-  if (isChatJobCancelled(jobId)) {
-    await updateJob(jobId, {
-      status: "stopped",
-      lastSummary: "Stopped by user",
-      error: "Stopped by user",
-      finishedAt: new Date(),
-    });
-    return;
-  }
+  if (await shouldStop()) return;
 
   const stageNote = result.mapEngagement
     ? "staged by engagement"
@@ -387,16 +379,21 @@ async function runAttioCsvImportJob(job: {
     jobId,
   });
 
-  await updateJob(jobId, {
-    status: "completed",
-    progressDone: result.imported + result.skipped,
-    progressTotal: result.importedCap || result.totalInFile,
-    lastSummary: `Imported ${result.imported} contacts`,
-    result,
-    error: "",
-    finishedAt: new Date(),
-    resultMessageId: saved?._id,
-  });
+  await ChatJob.findOneAndUpdate(
+    { _id: jobId, status: { $nin: ["stopped"] } },
+    {
+      $set: {
+        status: "completed",
+        progressDone: result.imported + result.skipped,
+        progressTotal: result.importedCap || result.totalInFile,
+        lastSummary: `Imported ${result.imported} contacts`,
+        result,
+        error: "",
+        finishedAt: new Date(),
+        resultMessageId: saved?._id,
+      },
+    },
+  );
 }
 
 async function runBrevoToAttioJob(job: {
@@ -430,6 +427,7 @@ async function runBrevoToAttioJob(job: {
   if (!attio?.apiKey) throw new Error("Attio is not connected");
   if (!brevo?.apiKey) throw new Error("Brevo is not connected");
 
+  const shouldStop = createChatJobStopChecker(jobId);
   const { importBrevoCampaignsToAttio } = await import("@/lib/brevo-attio-import");
   const result = await importBrevoCampaignsToAttio({
     attioApiKey: attio.apiKey,
@@ -442,21 +440,13 @@ async function runBrevoToAttioJob(job: {
     stageOpen: String(args.stageOpen || "Open"),
     stageClick: String(args.stageClick || "Click"),
     onStatus: async (text, done, total) => {
-      if (isChatJobCancelled(jobId)) throw new Error("Stopped by user");
+      if (await shouldStop()) throw new Error("Stopped by user");
       await updateJobProgress(jobId, { text, done, total });
     },
-    shouldCancel: () => isChatJobCancelled(jobId),
+    shouldCancel: shouldStop,
   });
 
-  if (isChatJobCancelled(jobId)) {
-    await updateJob(jobId, {
-      status: "stopped",
-      lastSummary: "Stopped by user",
-      error: "Stopped by user",
-      finishedAt: new Date(),
-    });
-    return;
-  }
+  if (await shouldStop()) return;
 
   const stageLines = Object.entries(result.byStage || {})
     .map(([stage, count]) => `- **${stage}:** ${Number(count).toLocaleString()}`)
@@ -523,6 +513,7 @@ async function runCampaignToAttioOnceJob(job: {
     throw new Error(`Unsupported source: ${sourceProvider}`);
   }
 
+  const shouldStop = createChatJobStopChecker(jobId);
   const { syncCampaignToAttioOnce } = await import("@/lib/automations");
   const result = await syncCampaignToAttioOnce({
     userId: String(job.userId),
@@ -537,19 +528,14 @@ async function runCampaignToAttioOnceJob(job: {
       args.realEngagement === true ||
       args.real_engagement === true ||
       String(args.realEngagement || args.real_engagement || "").toLowerCase() === "true",
+    shouldCancel: shouldStop,
     onStatus: async (text, done, total) => {
-      if (isChatJobCancelled(jobId)) throw new Error("Stopped by user");
+      if (await shouldStop()) throw new Error("Stopped by user");
       await updateJobProgress(jobId, { text, done, total });
     },
   });
 
-  if (isChatJobCancelled(jobId)) {
-    await updateJob(jobId, {
-      status: "stopped",
-      lastSummary: "Stopped by user",
-      error: "Stopped by user",
-      finishedAt: new Date(),
-    });
+  if (await shouldStop()) {
     return;
   }
 
@@ -568,14 +554,20 @@ async function runCampaignToAttioOnceJob(job: {
     jobId,
   });
 
-  await updateJob(jobId, {
-    status: "completed",
-    lastSummary: result.summary,
-    result,
-    error: "",
-    finishedAt: new Date(),
-    resultMessageId: saved?._id,
-  });
+  const completed = await ChatJob.findOneAndUpdate(
+    { _id: jobId, status: { $nin: ["stopped"] } },
+    {
+      $set: {
+        status: "completed",
+        lastSummary: result.summary,
+        result,
+        error: "",
+        finishedAt: new Date(),
+        resultMessageId: saved?._id,
+      },
+    },
+  );
+  if (!completed) return;
 }
 
 async function postJobMessage(input: {
@@ -672,14 +664,41 @@ function cancelledJobIds() {
   return g.__nexusesCancelledChatJobs;
 }
 
+/** In-memory flag (same Node process as the runner). */
 export function isChatJobCancelled(jobId: string) {
   return cancelledJobIds().has(jobId);
+}
+
+/** DB + memory — use during long background work (stop may hit another worker). */
+export async function isChatJobStopRequested(jobId: string) {
+  if (isChatJobCancelled(jobId)) return true;
+  const doc = await ChatJob.findById(jobId).select("status").lean();
+  if (doc?.status === "stopped") {
+    cancelledJobIds().add(jobId);
+    return true;
+  }
+  return false;
+}
+
+/** Polls DB at most every ~250ms; memory checks are instant. */
+export function createChatJobStopChecker(jobId: string) {
+  let lastDbCheck = 0;
+  let cached = false;
+  return async () => {
+    if (isChatJobCancelled(jobId)) return true;
+    const now = Date.now();
+    if (now - lastDbCheck < 250) return cached;
+    lastDbCheck = now;
+    cached = await isChatJobStopRequested(jobId);
+    return cached;
+  };
 }
 
 export async function stopProjectChatJobs(input: {
   userId: string;
   projectId: string;
   chatId?: string;
+  jobId?: string;
 }) {
   await dbConnect();
   const filter: Record<string, unknown> = {
@@ -688,10 +707,13 @@ export async function stopProjectChatJobs(input: {
     status: { $in: ["queued", "running"] },
   };
   if (input.chatId) filter.chatId = input.chatId;
+  if (input.jobId) filter._id = input.jobId;
 
   const jobs = await ChatJob.find(filter).select("_id").lean();
   for (const job of jobs) {
     cancelledJobIds().add(String(job._id));
+    const g = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
+    g.__nexusesChatJobLocks?.delete(String(job._id));
   }
 
   await ChatJob.updateMany(filter, {

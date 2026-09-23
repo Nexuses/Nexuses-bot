@@ -39,10 +39,12 @@ export async function POST(request: Request, { params }: Params) {
   if (action !== "stop") return jsonError("Unsupported action");
 
   const chatId = String(body?.chatId || "").trim();
+  const jobId = String(body?.jobId || body?.chatJobId || "").trim();
   const result = await stopProjectChatJobs({
     userId: session.userId,
     projectId: id,
     chatId: chatId || undefined,
+    jobId: jobId || undefined,
   });
   return Response.json({ ok: true, ...result });
 }

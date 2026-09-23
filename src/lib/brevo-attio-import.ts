@@ -255,7 +255,7 @@ export async function importBrevoCampaignsToAttio(input: {
   stageOpen?: string;
   stageClick?: string;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
-  shouldCancel?: () => boolean;
+  shouldCancel?: () => boolean | Promise<boolean>;
 }) {
   const stageProspect = String(input.stageProspect || "Prospect").trim() || "Prospect";
   const stageOpen = String(input.stageOpen || "Open").trim() || "Open";
@@ -285,7 +285,9 @@ export async function importBrevoCampaignsToAttio(input: {
   const campaignErrors: string[] = [];
 
   for (const [index, campaign] of campaigns.entries()) {
-    if (input.shouldCancel?.()) throw new Error("Stopped by user");
+    if (input.shouldCancel && (await Promise.resolve(input.shouldCancel()))) {
+      throw new Error("Stopped by user");
+    }
     await input.onStatus?.(
       `Exporting Brevo campaign ${index + 1}/${campaigns.length}: ${campaign}…`,
     );
@@ -389,7 +391,9 @@ export async function importBrevoCampaignsToAttio(input: {
   );
 
   await mapPool(people, 2, async (person) => {
-    if (input.shouldCancel?.()) throw new Error("Stopped by user");
+    if (input.shouldCancel && (await Promise.resolve(input.shouldCancel()))) {
+      throw new Error("Stopped by user");
+    }
     await new Promise((r) => setTimeout(r, 120));
     try {
       await upsertPersonWithStage(
