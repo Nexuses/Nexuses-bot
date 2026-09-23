@@ -14,6 +14,7 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { IntegrationsPanel } from "@/components/IntegrationsPanel";
 import { AutomationsPanel } from "@/components/AutomationsPanel";
 import type { AutomationDTO } from "@/lib/serialize-automation";
+import { DIRECT_CHAT_FILE_BYTES } from "@/lib/chat-file-limits";
 import { CHAT_RECIPES } from "@/lib/recipes";
 import type { ChatAttachment, ChatMessageDTO, ChatThreadDTO, IntegrationDTO } from "@/types/chat";
 import type { ProjectDTO, SessionUser } from "@/types";
@@ -45,6 +46,17 @@ function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Prefer stored progress; fall back to "N / M" in lastSummary when DB counter lags. */
+function chatJobProgress(job: ChatJobDTO) {
+  let done = Number(job.progressDone || 0);
+  const total = Number(job.progressTotal || 0);
+  if (done <= 0 && job.lastSummary) {
+    const match = job.lastSummary.match(/(\d[\d,]*)\s*\/\s*(\d[\d,]*)/);
+    if (match) done = Number(match[1].replace(/,/g, "")) || done;
+  }
+  return { done, total };
 }
 
 type ChatEvent = {
@@ -313,12 +325,14 @@ export function ProjectChat({
         body: JSON.stringify({
           action: "stop",
           jobId,
-          chatId: activeChatId || undefined,
         }),
       });
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        const data = await res.json().catch(() => null);
         throw new Error(data?.error || "Could not stop task");
+      }
+      if (data?.stopped === 0) {
+        throw new Error("Task was not running (already finished or not found).");
       }
       await refreshChatJobs();
     } catch (err) {
@@ -572,14 +586,20 @@ export function ProjectChat({
     setInput("");
     setFiles([]);
     setBusy(true);
-    setStatus(pending.length ? "Uploading your file…" : "Working on it…");
+    const needsSeparateUpload = pending.some((item) => item.file.size > DIRECT_CHAT_FILE_BYTES);
+    setStatus(needsSeparateUpload ? "Uploading your file…" : "Working on it…");
     stopRequestedRef.current = false;
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
       const uploadIds: string[] = [];
+      const directFiles: File[] = [];
       for (const [index, item] of pending.entries()) {
+        if (item.file.size <= DIRECT_CHAT_FILE_BYTES) {
+          directFiles.push(item.file);
+          continue;
+        }
         const id = await uploadPendingFile(
           item.file,
           (label) => {
@@ -594,10 +614,12 @@ export function ProjectChat({
         uploadIds.push(id);
       }
 
-      setStatus(pending.length ? "Reading your file…" : "Working on it…");
       const form = new FormData();
       form.set("message", text);
       if (activeChatId) form.set("chatId", activeChatId);
+      for (const file of directFiles) {
+        form.append("files", file);
+      }
       if (uploadIds.length) form.set("uploadIds", JSON.stringify(uploadIds));
 
       const res = await fetch(`/api/projects/${project._id}/chat`, {
@@ -736,9 +758,10 @@ export function ProjectChat({
         );
         if (active[0]) {
           if (!targetChat && active[0].chatId) targetChat = active[0].chatId;
+          const { done, total } = chatJobProgress(active[0]);
           setStatus(
             active[0].lastSummary ||
-              `Background task… ${active[0].progressDone || 0}/${active[0].progressTotal || "?"}`,
+              `Background task… ${done}/${total || "?"}`,
           );
         }
         if (finished?.chatId) targetChat = finished.chatId;
@@ -870,7 +893,9 @@ export function ProjectChat({
       {activeJobs.length ? (
         <div className="shrink-0 border-b border-line bg-panel/80 px-4 py-2 sm:px-6">
           <div className="mx-auto flex max-w-4xl flex-col gap-2">
-            {activeJobs.map((job) => (
+            {activeJobs.map((job) => {
+              const { done, total } = chatJobProgress(job);
+              return (
               <div
                 key={job._id}
                 className="flex items-center gap-3 rounded-xl border border-sea/40 bg-sea/10 px-3 py-2"
@@ -882,8 +907,8 @@ export function ProjectChat({
                 <p className="min-w-0 flex-1 truncate text-sm text-paper">
                   <span className="font-medium">Background task</span>
                   <span className="text-muted">
-                    {job.progressTotal > 0
-                      ? ` · ${Math.min(job.progressDone, job.progressTotal).toLocaleString()}/${job.progressTotal.toLocaleString()}`
+                    {total > 0
+                      ? ` · ${Math.min(done, total).toLocaleString()}/${total.toLocaleString()}`
                       : ""}
                     {" · "}
                     {job.lastSummary || job.title}
@@ -898,7 +923,8 @@ export function ProjectChat({
                   {stoppingId === job._id ? "Stopping…" : "Stop"}
                 </button>
               </div>
-            ))}
+            );
+            })}
           </div>
         </div>
       ) : null}

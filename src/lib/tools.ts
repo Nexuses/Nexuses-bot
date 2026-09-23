@@ -840,6 +840,9 @@ async function attioImportToList(
     stage_sent: args.stage_sent || args.stageSent || args.stage_prospect || "Prospect",
     stage_open: args.stage_open || args.stageOpen || "Open",
     stage_click: args.stage_click || args.stageClick || "Clicks",
+    campaign_name: args.campaign_name || args.campaignName || campaignNameFromFile(sheetFiles[0]?.name || "Campaign"),
+    source_file: sheetFiles[0]?.name || "",
+    source_upload_ids: (context.uploadIds || []).filter(Boolean),
   };
 
   // Peek rows so a single all-in-one engagement file also maps stages.
@@ -1894,6 +1897,8 @@ export function toolDefinitions(integrations: StoredIntegration[]): ToolDef[] {
 
 export type ToolContext = {
   files?: { name: string; text: string; summary?: string }[];
+  /** Chat upload ids for this turn (background CSV import fallback). */
+  uploadIds?: string[];
   onStatus?: (text: string) => void;
   onChatJob?: (job: {
     _id: string;

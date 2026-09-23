@@ -1,7 +1,7 @@
 import MemoryClient from "mem0ai";
 
 const AGENT_ID = "nexuses";
-const SEARCH_TIMEOUT_MS = 2500;
+const SEARCH_TIMEOUT_MS = 1200;
 const MAX_MEMORY_CHARS = 2500;
 
 function mem0Enabled() {
@@ -63,7 +63,7 @@ export async function searchMemories(input: {
         userId: input.userId,
         agentId: AGENT_ID,
       },
-      topK: 8,
+      topK: 4,
       threshold: 0.2,
     }),
     SEARCH_TIMEOUT_MS,

@@ -1,4 +1,6 @@
+import { buildCampaignNotes, ensureCampaignNotes } from "@/lib/attio-campaign-notes";
 import { attioNameValues, looksLikeEmail, splitPersonName } from "@/lib/attio-person-fields";
+import { campaignNameFromFile } from "@/lib/outreach-report";
 
 const ATTIO = "https://api.attio.com";
 
@@ -607,7 +609,66 @@ export type AttioImportResult = {
   truncated: boolean;
   names: string[];
   errors: string[];
+  notesWritten?: number;
 };
+
+function campaignNameFromImportRow(row: Record<string, string>, fallback: string) {
+  const fromRow = cell(row, [
+    "campaign",
+    "campaign name",
+    "campaign_name",
+    "email campaign",
+    "sequence name",
+    "sequence",
+    "mailing name",
+  ]).trim();
+  return fromRow || fallback;
+}
+
+function subjectFromImportRow(row: Record<string, string>) {
+  return cell(row, ["subject", "email subject", "subject line", "email_subject"]).trim();
+}
+
+function sentAtFromImportRow(row: Record<string, string>) {
+  return cell(row, [
+    "send date",
+    "send_date",
+    "sent time",
+    "sent_time",
+    "sent",
+    "delivered date",
+    "delivered_date",
+    "delivered",
+    "send time",
+  ]).trim();
+}
+
+function openedAtFromImportRow(row: Record<string, string>) {
+  if (!rowMatchesCsvFilter(row, "opened")) return "";
+  return cell(row, [
+    "open date",
+    "open_date",
+    "opened time",
+    "opened_time",
+    "open time",
+    "opened",
+    "first open",
+  ]).trim();
+}
+
+function clickedAtFromImportRow(row: Record<string, string>) {
+  if (!rowMatchesCsvFilter(row, "clicked")) return "";
+  return cell(row, [
+    "click date",
+    "click_date",
+    "clicked time",
+    "clicked_time",
+    "click time",
+    "clicked",
+    "cta clicked",
+    "last click",
+  ]).trim();
+}
 
 /** Infer Sent/Open/Click section from common export filenames (same campaign). */
 export function engagementSectionFromFileName(name: string) {
@@ -799,6 +860,12 @@ export async function runAttioCsvImportFromText(input: {
   const byStage: Record<string, number> = {};
   const fieldsSeen = new Set<string>(["email_addresses", "name", ...fieldPlan.used]);
   let doneCount = 0;
+  let notesWritten = 0;
+  const writeCampaignNotes =
+    effectiveMapEngagement || csvLooksLikeEngagement(rows);
+  const defaultCampaignName =
+    String(input.args.campaign_name || input.args.campaignName || "").trim() ||
+    campaignNameFromFile(String(input.args.source_file || input.args.sourceFile || "Campaign"));
   const modeNote = effectiveMapEngagement
     ? " with stages from CSV engagement"
     : stage
@@ -904,6 +971,24 @@ export async function runAttioCsvImportFromText(input: {
           }),
         });
       }
+      if (writeCampaignNotes) {
+        const campaignName = campaignNameFromImportRow(row, defaultCampaignName);
+        const notes = buildCampaignNotes({
+          campaignName,
+          subject: subjectFromImportRow(row),
+          stage: rowStage || "",
+          sentAt: sentAtFromImportRow(row) || undefined,
+          openedAt: openedAtFromImportRow(row) || undefined,
+          clickedAt: clickedAtFromImportRow(row) || undefined,
+          sourceLabel: "imported from campaign CSV",
+        });
+        notesWritten += await ensureCampaignNotes(
+          input.apiKey,
+          recordId,
+          campaignName,
+          notes,
+        );
+      }
       added.push(full || email);
       const stageKey = rowStage || "(no stage)";
       byStage[stageKey] = (byStage[stageKey] || 0) + 1;
@@ -911,7 +996,12 @@ export async function runAttioCsvImportFromText(input: {
       failed.push(`${label}: ${err instanceof Error ? err.message : "failed"}`);
     } finally {
       doneCount += 1;
-      if (doneCount === 1 || doneCount === rows.length || doneCount % 25 === 0) {
+      const reportProgress =
+        doneCount === 1 ||
+        doneCount === rows.length ||
+        doneCount <= 10 ||
+        doneCount % 10 === 0;
+      if (reportProgress) {
         await input.onStatus?.(
           `Uploading contacts to Attio… ${doneCount} / ${rows.length}`,
           doneCount,
@@ -936,6 +1026,7 @@ export async function runAttioCsvImportFromText(input: {
     truncated: allRows.length > maxRows,
     names: added.slice(0, 25),
     errors: failed.slice(0, 15),
+    notesWritten: writeCampaignNotes ? notesWritten : undefined,
   };
 }
 

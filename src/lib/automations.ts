@@ -1,3 +1,4 @@
+import { buildCampaignNotes, ensureCampaignNotes } from "@/lib/attio-campaign-notes";
 import { attioNameValues } from "@/lib/attio-person-fields";
 import { dbConnect } from "@/lib/db";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
@@ -111,11 +112,29 @@ function withQueryApiKey(url: string, apiKey: string) {
   return parsed.toString();
 }
 
-async function requestJson(url: string, init: RequestInit, retries = 6) {
+function throwIfJobAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error("Stopped by user");
+}
+
+async function requestJson(
+  url: string,
+  init: RequestInit,
+  retries = 6,
+  abortSignal?: AbortSignal,
+) {
   let lastError = "";
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    throwIfJobAborted(abortSignal);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 90_000);
+    const onJobAbort = () => controller.abort();
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        clearTimeout(timer);
+        throw new Error("Stopped by user");
+      }
+      abortSignal.addEventListener("abort", onJobAbort, { once: true });
+    }
     try {
       const res = await fetch(url, {
         ...init,
@@ -142,7 +161,9 @@ async function requestJson(url: string, init: RequestInit, retries = 6) {
         return text;
       }
     } catch (err) {
+      if (abortSignal?.aborted) throw new Error("Stopped by user");
       if (err instanceof Error && err.name === "AbortError") {
+        if (abortSignal?.aborted) throw new Error("Stopped by user");
         lastError = `Request timed out: ${url}`;
         if (attempt < retries) {
           await new Promise((r) => setTimeout(r, 1500));
@@ -153,6 +174,7 @@ async function requestJson(url: string, init: RequestInit, retries = 6) {
       throw err;
     } finally {
       clearTimeout(timer);
+      if (abortSignal) abortSignal.removeEventListener("abort", onJobAbort);
     }
   }
   throw new Error(lastError || `Request failed: ${url}`);
@@ -368,198 +390,6 @@ function resolveStageTitle(canonical: Map<string, string>, stage: string) {
   return canonical.get(desired.toLowerCase()) || desired;
 }
 
-function formatWhen(value?: string) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) return raw;
-  return date.toLocaleString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function buildCampaignNotes(input: {
-  campaignName: string;
-  subject?: string;
-  stage: string;
-  sentAt?: string;
-  openedAt?: string;
-  clickedAt?: string;
-}) {
-  const campaign = input.campaignName;
-  const subject = input.subject ? `Subject: ${input.subject}` : "";
-  const stageLower = input.stage.toLowerCase();
-  const isOpen = Boolean(input.openedAt) || /open/.test(stageLower);
-  const isClick = Boolean(input.clickedAt) || /click/.test(stageLower);
-  const notes: Array<{ title: string; content: string; kind: "sent" | "opened" | "clicked" }> =
-    [];
-
-  // 1) Campaign / sent details — once per campaign
-  notes.push({
-    kind: "sent",
-    title: `Sent · ${campaign}`.slice(0, 200),
-    content: [
-      `Campaign: ${campaign}`,
-      subject,
-      input.sentAt
-        ? `Sent to this contact: ${formatWhen(input.sentAt)}`
-        : "Sent to this contact (synced from campaign).",
-    ]
-      .filter(Boolean)
-      .join("\n"),
-  });
-
-  // 2) Open note — only if they opened
-  if (isOpen) {
-    notes.push({
-      kind: "opened",
-      title: `Opened · ${campaign}`.slice(0, 200),
-      content: [
-        `Campaign: ${campaign}`,
-        subject,
-        input.openedAt
-          ? `Contact opened the email: ${formatWhen(input.openedAt)}`
-          : "Contact opened the email (synced from campaign).",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    });
-  }
-
-  // 3) Click note — only if they clicked
-  if (isClick) {
-    notes.push({
-      kind: "clicked",
-      title: `Clicked · ${campaign}`.slice(0, 200),
-      content: [
-        `Campaign: ${campaign}`,
-        subject,
-        input.clickedAt
-          ? `Contact clicked a link: ${formatWhen(input.clickedAt)}`
-          : "Contact clicked a link (synced from campaign).",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    });
-  }
-
-  return notes;
-}
-
-type ExistingNotes = {
-  titles: Set<string>;
-  bodies: string[];
-  ok: boolean;
-};
-
-async function listPersonNotes(apiKey: string, recordId: string): Promise<ExistingNotes> {
-  try {
-    const data = (await requestJson(
-      `${ATTIO}/v2/notes?parent_object=people&parent_record_id=${encodeURIComponent(recordId)}&limit=50`,
-      { headers: attioHeaders(apiKey) },
-    )) as {
-      data?: Array<{ title?: string; content_plaintext?: string }>;
-    };
-    const rows = data.data || [];
-    return {
-      ok: true,
-      titles: new Set(
-        rows.map((item) => String(item.title || "").trim().toLowerCase()).filter(Boolean),
-      ),
-      bodies: rows.map((item) => String(item.content_plaintext || "").toLowerCase()),
-    };
-  } catch {
-    // If we cannot read notes, do NOT create more (avoids duplicate spam).
-    return { ok: false, titles: new Set(), bodies: [] };
-  }
-}
-
-function campaignNoteAlreadyExists(
-  existing: ExistingNotes,
-  campaignName: string,
-  kind: "sent" | "opened" | "clicked",
-  title: string,
-) {
-  const titleKey = title.trim().toLowerCase();
-  if (existing.titles.has(titleKey)) return true;
-
-  const campaign = campaignName.trim().toLowerCase();
-  if (!campaign) return false;
-
-  for (const t of existing.titles) {
-    if (!t.includes(campaign)) continue;
-    if (kind === "sent" && (t.startsWith("sent") || t.startsWith("campaign:"))) return true;
-    if (kind === "opened" && t.startsWith("opened")) return true;
-    if (kind === "clicked" && t.startsWith("clicked")) return true;
-  }
-
-  for (const body of existing.bodies) {
-    if (!body.includes(campaign)) continue;
-    // Old combined notes ended with "Synced by Nexuses · …" — treat as already written.
-    if (kind === "sent" && (body.includes("synced by nexuses") || body.includes("sent to"))) {
-      return true;
-    }
-    if (kind === "opened" && (body.includes("opened:") || body.includes("opened the email"))) {
-      return true;
-    }
-    if (kind === "clicked" && (body.includes("clicked:") || body.includes("clicked a link"))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function createAttioNote(
-  apiKey: string,
-  recordId: string,
-  note: { title: string; content: string },
-) {
-  await requestJson(`${ATTIO}/v2/notes`, {
-    method: "POST",
-    headers: attioHeaders(apiKey),
-    body: JSON.stringify({
-      data: {
-        parent_object: "people",
-        parent_record_id: recordId,
-        title: note.title.slice(0, 200),
-        format: "plaintext",
-        content: note.content.slice(0, 8000),
-      },
-    }),
-  });
-}
-
-/** Create Sent / Opened / Clicked notes only when missing — never re-add on every sync. */
-async function ensureCampaignNotes(
-  apiKey: string,
-  recordId: string,
-  campaignName: string,
-  notes: Array<{ title: string; content: string; kind: "sent" | "opened" | "clicked" }>,
-) {
-  if (!notes.length) return 0;
-  const existing = await listPersonNotes(apiKey, recordId);
-  if (!existing.ok) return 0;
-
-  let created = 0;
-  for (const note of notes) {
-    if (campaignNoteAlreadyExists(existing, campaignName, note.kind, note.title)) continue;
-    try {
-      await createAttioNote(apiKey, recordId, note);
-      existing.titles.add(note.title.trim().toLowerCase());
-      existing.bodies.push(note.content.toLowerCase());
-      created += 1;
-    } catch {
-      // Notes require note:read-write — don't fail the whole sync
-    }
-  }
-  return created;
-}
-
 async function mapPool<T>(
   items: T[],
   concurrency: number,
@@ -602,7 +432,9 @@ async function upsertAttioPerson(
       kind: "sent" | "opened" | "clicked";
     }> | null;
   },
+  abortSignal?: AbortSignal,
 ) {
+  throwIfJobAborted(abortSignal);
   const created = await requestJson(
     `${ATTIO}/v2/objects/people/records?matching_attribute=email_addresses`,
     {
@@ -617,6 +449,8 @@ async function upsertAttioPerson(
         },
       }),
     },
+    6,
+    abortSignal,
   );
   const recordId =
     (created as { data?: { id?: { record_id?: string } } })?.data?.id?.record_id || "";
@@ -639,11 +473,16 @@ async function upsertAttioPerson(
     let listed = false;
     for (const data of payloads) {
       try {
-        await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-          method: "PUT",
-          headers: attioHeaders(apiKey),
-          body: JSON.stringify({ data }),
-        });
+        await requestJson(
+          `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`,
+          {
+            method: "PUT",
+            headers: attioHeaders(apiKey),
+            body: JSON.stringify({ data }),
+          },
+          6,
+          abortSignal,
+        );
         listed = true;
         break;
       } catch {
@@ -651,15 +490,21 @@ async function upsertAttioPerson(
       }
     }
     if (!listed) {
-      await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-        method: "POST",
-        headers: attioHeaders(apiKey),
-        body: JSON.stringify({ data: payloads[0] }),
-      });
+      await requestJson(
+        `${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`,
+        {
+          method: "POST",
+          headers: attioHeaders(apiKey),
+          body: JSON.stringify({ data: payloads[0] }),
+        },
+        6,
+        abortSignal,
+      );
     }
   }
 
   if (person.notes?.length) {
+    throwIfJobAborted(abortSignal);
     await ensureCampaignNotes(
       apiKey,
       recordId,
@@ -910,6 +755,7 @@ async function syncUnifiedPortalSource(job: {
   oneShot?: boolean;
   realEngagement?: boolean;
   shouldCancel?: () => boolean | Promise<boolean>;
+  abortSignal?: AbortSignal;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const integration = await getCustomIntegration(
@@ -923,6 +769,7 @@ async function syncUnifiedPortalSource(job: {
   const stageClick = job.stageClick || "Click";
   const stageProspect = "Prospect";
   const throwIfStopped = async () => {
+    throwIfJobAborted(job.abortSignal);
     if (job.shouldCancel && (await Promise.resolve(job.shouldCancel()))) {
       throw new Error("Stopped by user");
     }
@@ -1049,16 +896,25 @@ async function syncUnifiedPortalSource(job: {
         clickedAt: person.clickedAt,
       });
       try {
-        await upsertAttioPerson(attio.apiKey, list.id, list.stageSlug, {
-          email: person.email,
-          name: person.name,
-          stage,
-          campaignName: campaign.name,
-          notes,
-        });
+        await upsertAttioPerson(
+          attio.apiKey,
+          list.id,
+          list.stageSlug,
+          {
+            email: person.email,
+            name: person.name,
+            stage,
+            campaignName: campaign.name,
+            notes,
+          },
+          job.abortSignal,
+        );
         updated += 1;
         notesWritten += 1;
       } catch (err) {
+        if (/stopped by user/i.test(err instanceof Error ? err.message : "")) {
+          throw err;
+        }
         failed += 1;
         if (!firstError) {
           firstError = err instanceof Error ? err.message : "Attio write failed";
@@ -1069,7 +925,11 @@ async function syncUnifiedPortalSource(job: {
         await job.onStatus?.(`Writing to Attio…`, done, batch.length);
       }
     },
-    job.shouldCancel,
+    async () => {
+      throwIfJobAborted(job.abortSignal);
+      if (job.shouldCancel && (await Promise.resolve(job.shouldCancel()))) return true;
+      return false;
+    },
   );
 
   const completed = campaignLooksCompleted(campaign.status);
@@ -1149,6 +1009,7 @@ async function syncRecipeSource(job: {
   oneShot?: boolean;
   realEngagement?: boolean;
   shouldCancel?: () => boolean | Promise<boolean>;
+  abortSignal?: AbortSignal;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const integration = await getCustomIntegration(
@@ -1173,6 +1034,7 @@ async function syncRecipeSource(job: {
       oneShot: job.oneShot,
       realEngagement: job.realEngagement,
       shouldCancel: job.shouldCancel,
+      abortSignal: job.abortSignal,
       onStatus: job.onStatus,
     });
   }
@@ -1365,11 +1227,13 @@ export async function syncCampaignToAttioOnce(input: {
   stageReply?: string;
   realEngagement?: boolean;
   shouldCancel?: () => boolean | Promise<boolean>;
+  abortSignal?: AbortSignal;
   onStatus?: (text: string, done?: number, total?: number) => void | Promise<void>;
 }) {
   const stageOpen = input.stageOpen || "Open";
   const stageClick = input.stageClick || "Click";
   const stageReply = input.stageReply || "Open";
+  throwIfJobAborted(input.abortSignal);
   await input.onStatus?.(
     `One-time sync · ${input.campaignName} → ${input.attioList}`,
   );
@@ -1432,6 +1296,7 @@ export async function syncCampaignToAttioOnce(input: {
     oneShot: true,
     realEngagement: input.realEngagement,
     shouldCancel: input.shouldCancel,
+    abortSignal: input.abortSignal,
     onStatus: input.onStatus,
   });
 }

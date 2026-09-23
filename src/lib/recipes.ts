@@ -33,9 +33,9 @@ export const CHAT_RECIPES: Recipe[] = [
   {
     id: "import-csv",
     title: "Import CSV → Attio",
-    blurb: "Upload a report and put contacts on a list",
+    blurb: "Upload → pick list → real opens/clicks → background import",
     start:
-      "I will import a campaign CSV/Excel into an Attio list. Ask which list and stages, then ask whether I want real opens/clicks (≥45 seconds after send) or all current opens/clicks. Wait for my file if needed.",
+      "Start Import CSV → Attio. Follow the guided import recipe exactly: (1) ask me to upload my CSV/Excel first — do not ask for Attio list or engagement until a file is attached, (2) after upload ask which Attio list, (3) ask real opens/clicks Yes or No, (4) run attio_import_to_list once as a background task. Stages are ALWAYS Prospect, Open, Click.",
   },
   {
     id: "automations",
@@ -117,12 +117,26 @@ Option C
 
 Use at most 12 options. Prefer these patterns:
 
-1) Import / map opens & clicks into Attio — ALWAYS ask before writing stages:
+1) Import CSV → Attio (STRICT guided flow — one step at a time):
+When the user picks this recipe or says import CSV to Attio, follow this order only. Do NOT call attio_import_to_list until Step D. Do NOT ask for stage names — stages are ALWAYS Prospect, Open, Click (sent→Prospect, opened→Open, clicked→Click).
+
+Step 1 — Upload (FIRST, before anything else):
+If no CSV/Excel is attached in this chat turn or recent history, ask ONLY for the file. Tell them to use the paperclip / attach button. Do NOT ask Attio list, engagement, or call attio_import_to_list yet. One short message; no :::choices unless they need “I’ll upload now” vs “Use files I already attached” when the system note says files are still available from an earlier turn.
+
+Step 2 — Attio list (ONLY after a file is attached or available to tools):
+Call attio_list_lists. Ask which list to import into. Put existing list names in :::choices AND always include: Create new list. If Create new list → ask for the name, then attio_create_list with stages exactly ["Prospect","Open","Click"], then continue.
+
+Step 3 — Real engagement (REQUIRED before import):
+Ask: "Count only real opens & clicks (at least 45 seconds after send/delivery)?"
 :::choices
-Real opens & clicks (≥45s after send)
-All current opens & clicks
+Yes — real opens & clicks only (≥45s after send/delivery)
+No — all opens & clicks from the report
 :::
-“Real” means the person opened or clicked at least 45 seconds after Send_Date (filters instant/bot/proxy opens). Pass real_engagement=true to attio_import_to_list when they pick real.
+“Real” = opened or clicked ≥45s after Send_Date / delivery (filters instant/bot/proxy). Pass real_engagement=true when Yes, false when No.
+
+Step 4 — Import (background):
+Call attio_import_to_list ONCE with list + real_engagement. Tell the user a background task is running; do NOT invent row counts — wait for the job result message.
+One campaign may be THREE files (delivered + opened + clicked) or ONE combined file — still ONE attio_import_to_list call; server merges (Click > Open > Prospect).
 
 2) Campaign report for Attio-connected campaigns — ALWAYS ask period if not stated:
 :::choices
@@ -158,7 +172,7 @@ No — one-time sync only
   - No → sync_campaign_to_attio mode="once" with real_engagement from Step C2 (background job of current opens/clicks only).
 Stages are ALWAYS Prospect / Open / Click.
 
-4) CSV attach without a clear list — ask which Attio list (and engagement mode as above), then attio_import_to_list once. Default stages Prospect / Open / Click when creating a list for imports.
+4) CSV attached outside the Import recipe — still use order: confirm file → list (Step 2) → real engagement (Step 3) → attio_import_to_list once.
 
 5) Connect tools — ask which app and for the API key (or Notion OAuth button).
 

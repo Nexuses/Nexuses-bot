@@ -1,12 +1,17 @@
 import { jsonError } from "@/lib/api";
 import {
   buildFilePrompt,
-  extractUploadedFile,
   MAX_CHAT_FILES,
   toolFilePayload,
   type ExtractedFile,
 } from "@/lib/attachments";
-import { bindChatUpload, loadChatUploadFile, loadRecentChatUploads } from "@/lib/chat-uploads";
+import {
+  bindChatUpload,
+  listChatUploadsForChat,
+  loadChatUploadExtracted,
+  loadRecentChatUploads,
+  saveChatUpload,
+} from "@/lib/chat-uploads";
 import { ensureAutomationRunner } from "@/lib/automations";
 import { ensureChatJobRunner } from "@/lib/chat-jobs";
 import { openingStatus, statusForTool } from "@/lib/chat-status";
@@ -192,32 +197,33 @@ export async function POST(request: Request, { params }: Params) {
   let extracted: ExtractedFile[] = [];
   let usedUploadIds: string[] = [];
   try {
-    const fromUploads = await Promise.all(
+    extracted = await Promise.all(
       uploadIds.map(async (uploadId) => {
-        const { file, meta } = await loadChatUploadFile({
+        const extractedFile = await loadChatUploadExtracted({
           userId: session.userId,
           projectId: id,
           uploadId,
         });
-        usedUploadIds.push(meta.id);
-        const extractedFile = await extractUploadedFile(file);
-        extractedFile.meta = { ...extractedFile.meta, uploadId: meta.id };
+        usedUploadIds.push(String(extractedFile.meta.uploadId || uploadId));
         return extractedFile;
       }),
     );
-    const fromFiles = await Promise.all(files.map((file) => extractUploadedFile(file)));
-    extracted = [...fromUploads, ...fromFiles];
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : "Could not read a file");
   }
 
+  const fileCount = files.length + extracted.length;
   const displayText =
     text ||
-    (extracted.length === 1
-      ? `Uploaded ${extracted[0].meta.name}`
-      : extracted.length > 1
-        ? `Uploaded ${extracted.length} files`
-        : "");
+    (files.length === 1
+      ? `Uploaded ${files[0].name}`
+      : files.length > 1
+        ? `Uploaded ${files.length} files`
+        : extracted.length === 1
+          ? `Uploaded ${extracted[0].meta.name}`
+          : fileCount > 1
+            ? `Uploaded ${fileCount} files`
+            : "");
 
   let chat = requestedChatId
     ? await getOwnedChat(session.userId, id, requestedChatId)
@@ -235,6 +241,28 @@ export async function POST(request: Request, { params }: Params) {
   } else {
     chat.updatedAt = new Date();
     await chat.save();
+  }
+
+  if (files.length) {
+    try {
+      for (const file of files) {
+        const meta = await saveChatUpload({
+          userId: session.userId,
+          projectId: id,
+          file,
+          chatId: String(chat._id),
+        });
+        usedUploadIds.push(meta.id);
+        const extractedFile = await loadChatUploadExtracted({
+          userId: session.userId,
+          projectId: id,
+          uploadId: meta.id,
+        });
+        extracted.push(extractedFile);
+      }
+    } catch (err) {
+      return jsonError(err instanceof Error ? err.message : "Could not save upload");
+    }
   }
 
   // Keep uploads available for follow-up turns in this chat (do not delete after one request).
@@ -269,19 +297,31 @@ export async function POST(request: Request, { params }: Params) {
         .map((item: { uploadId?: string }) => String(item.uploadId || "").trim())
         .filter(Boolean),
     );
-    if (priorIds.length) {
+    let idsToLoad = [...new Set(priorIds)];
+    if (!idsToLoad.length) {
+      const fromChat = await listChatUploadsForChat({
+        userId: session.userId,
+        projectId: id,
+        chatId: String(chat._id),
+        limit: 5,
+      });
+      idsToLoad = fromChat.map((m) => m.id);
+    }
+    if (idsToLoad.length) {
       const reloaded = await loadRecentChatUploads({
         userId: session.userId,
         projectId: id,
         chatId: String(chat._id),
-        uploadIds: priorIds,
+        uploadIds: idsToLoad,
       });
       extracted = await Promise.all(
-        reloaded.map(async ({ file, meta }) => {
-          const item = await extractUploadedFile(file);
-          item.meta = { ...item.meta, uploadId: meta.id };
-          return item;
-        }),
+        reloaded.map(({ meta }) =>
+          loadChatUploadExtracted({
+            userId: session.userId,
+            projectId: id,
+            uploadId: meta.id,
+          }),
+        ),
       );
     }
   }
@@ -302,7 +342,7 @@ export async function POST(request: Request, { params }: Params) {
             type: "image_url" as const,
             image_url: {
               url: `data:${item.image.mime};base64,${item.image.base64}`,
-              detail: "high" as const,
+              detail: "auto" as const,
             },
           },
         ]
@@ -312,12 +352,18 @@ export async function POST(request: Request, { params }: Params) {
     ? [{ type: "text", text: llmText }, ...imageParts]
     : llmText;
 
-  const [history, integrationDocs] = await Promise.all([
+  const [history, integrationDocs, memories] = await Promise.all([
     Message.find({ userId: session.userId, projectId: id, chatId: chat._id })
       .sort({ createdAt: -1 })
-      .limit(40)
+      .limit(20)
       .lean(),
     Integration.find({ userId: session.userId, projectId: id }).lean(),
+    searchMemories({
+      userId: session.userId,
+      projectId: id,
+      chatId: String(chat._id),
+      query: displayText || text,
+    }).catch(() => [] as string[]),
   ]);
 
   const integrations: StoredIntegration[] = integrationDocs.map((doc) => ({
@@ -335,13 +381,14 @@ export async function POST(request: Request, { params }: Params) {
     item.provider === "other" ? `${item.name} (custom)` : item.name,
   );
 
-  const memories = await searchMemories({
-    userId: session.userId,
-    projectId: id,
-    chatId: String(chat._id),
-    query: displayText || text,
-  });
   const memoryBlock = formatMemoryPrompt(memories);
+  const wantsHeavyHtmlGuide =
+    /\b(html|dashboard|shareable|drill.?down|share_html|investera|report page)\b/i.test(
+      `${displayText} ${text}`,
+    );
+  const htmlGuideBlock = wantsHeavyHtmlGuide
+    ? HTML_DASHBOARD_PROMPT
+    : "HTML/dashboard: use share_csv_dashboard, share_data_dashboard, or share_html_* tools when needed (full styling rules apply when building a page).";
 
   const system = `You are Nexuses, a Grok-style action agent for the project "${project.name}".
 You do the work. You are not a documentation bot.
@@ -401,11 +448,11 @@ Formatting (required):
 - Campaign / lead tables when data is NOT from an attached spreadsheet: call share_data_dashboard with title, kpis, columns, and rows JSON, then paste [Open report](url).
 - Large custom HTML: share_html_begin → share_html_append (chunks ≤12000 chars, multiple per turn) → share_html_finish, then paste the returned url as [Open report](url).
 - Small HTML only: share_html with the full document is fine — also paste [Open report](url) from the tool result.
-${HTML_DASHBOARD_PROMPT}
+${htmlGuideBlock}
 - If files are attached, treat their extracted contents as source data and use them to finish the task (import contacts, create records, summarize, and so on). Attached CSV prompts show a short sample only; tools still receive the full file.
 - If images or screenshots are attached, you CAN see them. Read the pixels, extract visible text, and answer from what is in the image. Never say you cannot view images.
 - If the user asks who / what is on an Attio list or stage (Hot, Engage, Cold, Prospect, etc.), call attio_list_entries with the list from chat history. Answer with counts + names/emails. Do not ask what the stage means.
-- If the user uploads CSV/Excel for Attio, ask engagement mode with :::choices (real ≥45s vs all current) unless they already chose, then call attio_import_to_list once with real_engagement true/false. It writes every useful CSV column onto People and creates missing People attributes when needed. If they attach delivered + opened + clicked for the same campaign, that is ONE campaign — still one tool call. Stages: Clicks > Opens > Prospect. Background + rate-limit retries. Never invent per-stage counts — wait for the background result.
+- Import CSV → Attio (guided order): (1) if no file attached yet, ask ONLY for CSV/Excel upload — do not ask list or engagement; (2) after file is available, attio_list_lists and ask which list (or create new with Prospect/Open/Click); (3) ask real opens/clicks with :::choices (≥45s vs all current); (4) call attio_import_to_list ONCE with real_engagement true/false — background job only. Never skip steps or import before list + engagement are chosen. One or three files = one campaign, one tool call. Never invent counts — wait for the background result.
 - If the user asks who opened / clicked / replied in a Lemlist campaign, call lemlist_people_by_event once. Never page through activities with repeated lemlist_api calls.
 - If the user asks for Brevo campaigns / a partial campaign list, call brevo_list_campaigns once without status. Use status sent only when they ask for completed/sent campaigns.
 - If the user asks who opened/clicked a Brevo campaign, call brevo_people_by_event once for a sample/count only — never claim that sample filled Attio. To import all recipients from one or more Brevo campaigns into an Attio list with stages, call brevo_import_campaigns_to_attio once and wait for the background result. If the tool says needsRestApiKey, ask them to paste a standard (non-MCP) Brevo API key and connect it — it is stored alongside MCP.
@@ -447,7 +494,7 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
       const secretsUsed: string[] = [];
       const shareUrls: string[] = [];
       let nudged = false;
-      let activeTools = toolDefinitions(integrations);
+      const activeTools = toolDefinitions(integrations);
       const heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`));
@@ -577,12 +624,13 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
           if (round === 8) send({ type: "status", text: "Almost there. Finishing up…" });
           if (round === 16) send({ type: "status", text: "Still assembling the page…" });
 
-          activeTools = toolDefinitions(integrations);
-          const reply = await withSlowHint(
-            send,
-            "This is taking a little time…",
-            complete(llmMessages, activeTools, { conversationId: String(chat._id) }),
-          );
+          const reply = await (round === 0
+            ? complete(llmMessages, activeTools, { conversationId: String(chat._id) })
+            : withSlowHint(
+                send,
+                "This is taking a little time…",
+                complete(llmMessages, activeTools, { conversationId: String(chat._id) }),
+              ));
           if (reply.tool_calls?.length) {
             llmMessages.push({
               role: "assistant",
@@ -596,6 +644,9 @@ ${providerGuide(integrations)}${memoryBlock ? `\n\n${memoryBlock}` : ""}`;
               try {
                 result = await runTool(call.function.name, call.function.arguments, integrations, {
                   files: toolFilePayload(extracted),
+                  uploadIds: extracted
+                    .map((item) => String(item.meta.uploadId || "").trim())
+                    .filter(Boolean),
                   onStatus: (statusText) => send({ type: "status", text: statusText }),
                   onChatJob: (job) => send({ type: "chat_job", job }),
                   userId: session.userId,

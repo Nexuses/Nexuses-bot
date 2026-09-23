@@ -23,6 +23,20 @@ function looksLikeClarificationReply(text: string) {
   );
 }
 
+/** Nexuses guided recipes + common chip replies — skip the extra structuring LLM call. */
+function isGuidedProductFlow(text: string) {
+  const t = text.trim();
+  if (!t) return false;
+  return (
+    /\b(import csv|sync campaign|connect tools|campaign report|live automation|attio list|upload.*(csv|excel|spreadsheet|file)|real opens|all current opens|paperclip|attach.*file)\b/i.test(
+      t,
+    ) ||
+    /^start (import|sync)/i.test(t) ||
+    /^i will import/i.test(t) ||
+    /^i want to (connect|import|sync)/i.test(t)
+  );
+}
+
 export function needsPromptStructuring(input: {
   text: string;
   fileCount: number;
@@ -32,12 +46,13 @@ export function needsPromptStructuring(input: {
   const text = input.text.trim();
   if (!text && input.fileCount === 0) return false;
 
-  // Follow-ups in an existing thread: skip the clarifier — main agent has history.
-  if ((input.historyCount || 0) >= 2 && text.length < 220 && input.fileCount === 0) {
-    return false;
-  }
+  // Extra LLM pass is expensive — default off unless a long, ambiguous first message.
+  if ((input.historyCount || 0) >= 1) return false;
+  if (input.fileCount > 0) return false;
+  if (isGuidedProductFlow(text)) return false;
+  if (looksLikeWork(text) && text.length < 260) return false;
 
-  // User is answering our clarifying questions — don't ask again; execute.
+  // User is answering clarifying questions — don't ask again; execute.
   if (
     input.lastAssistantText &&
     /clarif|quick question|before i (can )?(start|continue|build|pull)|i want to make sure|need (a bit )?more|which (one|tool|app|campaign|list|object)/i.test(
@@ -48,10 +63,8 @@ export function needsPromptStructuring(input: {
     return false;
   }
 
-  if (input.fileCount > 0) return true;
-  if (looksLikeWork(text)) return true;
-  if (text.length >= 140) return true;
-  return false;
+  // Only structure a long, vague opening message with no files.
+  return text.length >= 320;
 }
 
 function extractJsonObject(raw: string) {

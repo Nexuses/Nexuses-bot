@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, rm } from "fs/promises";
+import { mkdir, writeFile, readFile, rm, access } from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
 import { dbConnect } from "@/lib/db";
@@ -71,6 +71,7 @@ export async function enqueueAttioCsvImport(input: {
   await mkdir(dir, { recursive: true });
   const payloadPath = path.join(dir, `${id}.csv`);
   await writeFile(payloadPath, input.csvText, "utf8");
+  await access(payloadPath);
 
   const job = await ChatJob.create({
     userId: input.userId,
@@ -202,53 +203,122 @@ async function updateJobProgress(
       : undefined;
   const text = input.text !== undefined ? String(input.text) : undefined;
 
-  if (done === undefined) {
-    const set: Record<string, unknown> = {};
-    if (text !== undefined) set.lastSummary = text;
-    if (total !== undefined) set.progressTotal = total;
-    if (Object.keys(set).length) await ChatJob.findByIdAndUpdate(id, { $set: set });
-    return;
+  const set: Record<string, unknown> = {};
+  if (text !== undefined) set.lastSummary = text;
+  if (total !== undefined) set.progressTotal = total;
+
+  const patch: Record<string, unknown> = {};
+  if (Object.keys(set).length) patch.$set = set;
+  // Never move progress backward (status lines often pass done=0).
+  if (done !== undefined && done > 0) patch.$max = { progressDone: done };
+
+  if (!Object.keys(patch).length) return;
+
+  await ChatJob.findByIdAndUpdate(id, patch);
+}
+
+/** Load CSV for a background import — job file first, then chat uploads if the payload was removed. */
+async function loadCsvPayloadForJob(job: {
+  userId: unknown;
+  projectId: unknown;
+  chatId: unknown;
+  payloadPath?: string;
+  args?: Record<string, unknown>;
+}): Promise<string> {
+  if (job.payloadPath) {
+    try {
+      return await readFile(job.payloadPath, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw err;
+    }
   }
 
-  // Only apply when this report is ahead of (or equal to) what's stored.
-  await ChatJob.updateOne(
-    {
-      _id: id,
-      status: { $nin: ["stopped"] },
-      $or: [{ progressDone: { $lte: done } }, { progressDone: { $exists: false } }, { progressDone: null }],
-    },
-    {
-      $set: {
-        progressDone: done,
-        ...(total !== undefined ? { progressTotal: total } : {}),
-        ...(text !== undefined ? { lastSummary: text } : {}),
-      },
-    },
+  const args = job.args || {};
+  const uploadIds = Array.isArray(args.source_upload_ids)
+    ? args.source_upload_ids.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+
+  const { listChatUploadsForChat, loadChatUploadFile } = await import("@/lib/chat-uploads");
+  const userId = String(job.userId);
+  const projectId = String(job.projectId);
+  const chatId = String(job.chatId);
+
+  for (const uploadId of uploadIds) {
+    try {
+      const { file } = await loadChatUploadFile({ userId, projectId, uploadId });
+      return await file.text();
+    } catch {
+      // try next source
+    }
+  }
+
+  const uploads = await listChatUploadsForChat({ userId, projectId, chatId, limit: 5 });
+  for (const meta of uploads) {
+    try {
+      const { file } = await loadChatUploadFile({ userId, projectId, uploadId: meta.id });
+      return await file.text();
+    } catch {
+      // try next upload
+    }
+  }
+
+  throw new Error(
+    "CSV payload missing on disk. Re-attach the file and run import again.",
   );
 }
 
+const JOB_STALL_MS = 3 * 60 * 1000;
+
 export async function processChatJobById(jobId: string) {
   await dbConnect();
+
+  const g = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
+  if (!g.__nexusesChatJobLocks) g.__nexusesChatJobLocks = new Set();
+  if (g.__nexusesChatJobLocks.has(jobId)) {
+    const locked = await ChatJob.findById(jobId).lean();
+    return locked ? serializeChatJob(locked) : null;
+  }
+
+  const existing = await ChatJob.findById(jobId).lean();
+  if (!existing) return null;
+  if (!["queued", "running"].includes(existing.status)) {
+    return serializeChatJob(existing);
+  }
+
+  const updatedAtMs = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+  if (
+    existing.status === "running" &&
+    updatedAtMs > 0 &&
+    Date.now() - updatedAtMs < JOB_STALL_MS
+  ) {
+    return serializeChatJob(existing);
+  }
+
   const job = await ChatJob.findOneAndUpdate(
     { _id: jobId, status: { $in: ["queued", "running"] } },
     {
       $set: {
         status: "running",
-        startedAt: new Date(),
-        lastSummary: "Running…",
-        progressDone: 0,
-        error: "",
+        ...(existing.status === "queued"
+          ? {
+              startedAt: new Date(),
+              progressDone: 0,
+              error: "",
+              lastSummary: "Running…",
+            }
+          : {
+              lastSummary: existing.lastSummary || "Retrying after stall…",
+            }),
       },
     },
     { returnDocument: "after" },
   );
   if (!job) return null;
+  if (await isChatJobStopRequested(jobId)) return serializeChatJob(job);
 
-  // Prevent double-run: if already being processed by another worker with a lock,
-  // we use a simple in-memory set.
-  const g = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
-  if (!g.__nexusesChatJobLocks) g.__nexusesChatJobLocks = new Set();
-  if (g.__nexusesChatJobLocks.has(jobId)) return serializeChatJob(job);
+  getChatJobAbortSignal(jobId);
+
   g.__nexusesChatJobLocks.add(jobId);
 
   try {
@@ -269,16 +339,21 @@ export async function processChatJobById(jobId: string) {
     const stopped = /stopped by user/i.test(message);
     // Only mark failed if this run is still the active one (avoids clobbering a reclaim retry).
     const stillMine = await ChatJob.findOneAndUpdate(
-      {
-        _id: jobId,
-        status: "running",
-        ...(job.startedAt ? { startedAt: job.startedAt } : {}),
-      },
+      stopped
+        ? {
+            _id: jobId,
+            status: { $in: ["queued", "running"] },
+          }
+        : {
+            _id: jobId,
+            status: "running",
+            ...(job.startedAt ? { startedAt: job.startedAt } : {}),
+          },
       {
         $set: {
           status: stopped ? "stopped" : "failed",
           error: message,
-          lastSummary: message,
+          lastSummary: stopped ? "Stopped by user" : message,
           finishedAt: new Date(),
         },
       },
@@ -300,9 +375,7 @@ export async function processChatJobById(jobId: string) {
     }
   } finally {
     g.__nexusesChatJobLocks.delete(jobId);
-    if (job.payloadPath) {
-      await rm(job.payloadPath, { force: true }).catch(() => undefined);
-    }
+    releaseChatJobAbort(jobId);
   }
 
   const fresh = await ChatJob.findById(jobId).lean();
@@ -319,8 +392,7 @@ async function runAttioCsvImportJob(job: {
   progressTotal?: number;
 }) {
   const jobId = String(job._id);
-  if (!job.payloadPath) throw new Error("Missing CSV payload");
-  const csvText = await readFile(job.payloadPath, "utf8");
+  const csvText = await loadCsvPayloadForJob(job);
   const attio = await Integration.findOne({
     userId: job.userId,
     projectId: job.projectId,
@@ -329,6 +401,7 @@ async function runAttioCsvImportJob(job: {
   if (!attio?.apiKey) throw new Error("Attio is not connected");
 
   const shouldStop = createChatJobStopChecker(jobId);
+  getChatJobAbortSignal(jobId);
   const { runAttioCsvImportFromText } = await import("@/lib/attio-import");
   const result = await runAttioCsvImportFromText({
     apiKey: attio.apiKey,
@@ -354,8 +427,13 @@ async function runAttioCsvImportJob(job: {
     .map(([name, count]) => `- **${name}**: ${Number(count).toLocaleString()}`);
   const fieldsWritten = Array.isArray(result.fieldsWritten) ? result.fieldsWritten : [];
   const fieldsCreated = Array.isArray(result.fieldsCreated) ? result.fieldsCreated : [];
+  const notesLine =
+    typeof result.notesWritten === "number" && result.notesWritten > 0
+      ? `Attio notes: Sent / Opened / Clicked where applicable (${result.notesWritten.toLocaleString()} note writes, de-duplicated per person).`
+      : "";
   const content = [
     `**Import finished** — ${result.imported.toLocaleString()} contacts into **${result.list}**${stageNote ? ` (${stageNote})` : ""}.`,
+    notesLine,
     stageLines.length ? stageLines.join("\n") : "",
     fieldsWritten.length
       ? `People fields written: ${fieldsWritten.slice(0, 20).join(", ")}${fieldsWritten.length > 20 ? "…" : ""}`
@@ -394,6 +472,10 @@ async function runAttioCsvImportJob(job: {
       },
     },
   );
+
+  if (job.payloadPath) {
+    await rm(job.payloadPath, { force: true }).catch(() => undefined);
+  }
 }
 
 async function runBrevoToAttioJob(job: {
@@ -428,6 +510,7 @@ async function runBrevoToAttioJob(job: {
   if (!brevo?.apiKey) throw new Error("Brevo is not connected");
 
   const shouldStop = createChatJobStopChecker(jobId);
+  getChatJobAbortSignal(jobId);
   const { importBrevoCampaignsToAttio } = await import("@/lib/brevo-attio-import");
   const result = await importBrevoCampaignsToAttio({
     attioApiKey: attio.apiKey,
@@ -514,6 +597,7 @@ async function runCampaignToAttioOnceJob(job: {
   }
 
   const shouldStop = createChatJobStopChecker(jobId);
+  const abortSignal = getChatJobAbortSignal(jobId);
   const { syncCampaignToAttioOnce } = await import("@/lib/automations");
   const result = await syncCampaignToAttioOnce({
     userId: String(job.userId),
@@ -529,6 +613,7 @@ async function runCampaignToAttioOnceJob(job: {
       args.real_engagement === true ||
       String(args.realEngagement || args.real_engagement || "").toLowerCase() === "true",
     shouldCancel: shouldStop,
+    abortSignal,
     onStatus: async (text, done, total) => {
       if (await shouldStop()) throw new Error("Stopped by user");
       await updateJobProgress(jobId, { text, done, total });
@@ -594,11 +679,13 @@ async function postJobMessage(input: {
 export async function processDueChatJobs(limit = 3) {
   await dbConnect();
 
-  // Reclaim jobs stuck in "running" after a crash / hot-reload / hung request.
-  const stallCutoff = new Date(Date.now() - 90_000);
+  // Reclaim jobs stuck in "running" (no progress heartbeat). Long CSV imports update `updatedAt` via progress.
+  const stallCutoff = new Date(Date.now() - JOB_STALL_MS);
   const stalled = await ChatJob.find({
     status: "running",
-    $or: [{ startedAt: { $lte: stallCutoff } }, { startedAt: { $exists: false } }],
+    error: { $ne: "Stopped by user" },
+    lastSummary: { $ne: "Stopped by user" },
+    updatedAt: { $lte: stallCutoff },
   })
     .select("_id")
     .lean();
@@ -629,9 +716,6 @@ export async function processDueChatJobs(limit = 3) {
 
   const out: ChatJobDTO[] = [];
   for (const job of due) {
-    // Clear stale in-memory lock so reclaim works in the same process.
-    const g = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
-    g.__nexusesChatJobLocks?.delete(String(job._id));
     const updated = await processChatJobById(String(job._id));
     if (updated) out.push(updated);
   }
@@ -643,7 +727,7 @@ export function ensureChatJobRunner() {
     __nexusesChatJobTimer?: NodeJS.Timeout;
     __nexusesChatJobRunnerVersion?: number;
   };
-  const RUNNER_VERSION = 3; // bump when job types / handlers change
+  const RUNNER_VERSION = 4; // bump when job types / handlers change
   if (g.__nexusesChatJobTimer && g.__nexusesChatJobRunnerVersion === RUNNER_VERSION) {
     return;
   }
@@ -680,18 +764,37 @@ export async function isChatJobStopRequested(jobId: string) {
   return false;
 }
 
-/** Polls DB at most every ~250ms; memory checks are instant. */
+/** Never caches "not stopped" — stop must be visible within one Attio write. */
 export function createChatJobStopChecker(jobId: string) {
-  let lastDbCheck = 0;
-  let cached = false;
   return async () => {
     if (isChatJobCancelled(jobId)) return true;
-    const now = Date.now();
-    if (now - lastDbCheck < 250) return cached;
-    lastDbCheck = now;
-    cached = await isChatJobStopRequested(jobId);
-    return cached;
+    return isChatJobStopRequested(jobId);
   };
+}
+
+function jobAbortControllers() {
+  const g = globalThis as unknown as { __nexusesJobAbort?: Map<string, AbortController> };
+  if (!g.__nexusesJobAbort) g.__nexusesJobAbort = new Map();
+  return g.__nexusesJobAbort;
+}
+
+export function getChatJobAbortSignal(jobId: string) {
+  const map = jobAbortControllers();
+  let ac = map.get(jobId);
+  if (!ac || ac.signal.aborted) {
+    ac = new AbortController();
+    map.set(jobId, ac);
+  }
+  return ac.signal;
+}
+
+export function abortChatJobWork(jobId: string) {
+  cancelledJobIds().add(jobId);
+  jobAbortControllers().get(jobId)?.abort();
+}
+
+function releaseChatJobAbort(jobId: string) {
+  jobAbortControllers().delete(jobId);
 }
 
 export async function stopProjectChatJobs(input: {
@@ -701,17 +804,25 @@ export async function stopProjectChatJobs(input: {
   jobId?: string;
 }) {
   await dbConnect();
+  const jobId = String(input.jobId || "").trim();
+
+  // Abort in-flight HTTP on this process immediately (even if DB filter misses).
+  if (jobId) abortChatJobWork(jobId);
+
   const filter: Record<string, unknown> = {
     userId: input.userId,
     projectId: input.projectId,
     status: { $in: ["queued", "running"] },
   };
-  if (input.chatId) filter.chatId = input.chatId;
-  if (input.jobId) filter._id = input.jobId;
+  if (jobId) {
+    filter._id = jobId;
+  } else if (input.chatId) {
+    filter.chatId = input.chatId;
+  }
 
   const jobs = await ChatJob.find(filter).select("_id").lean();
   for (const job of jobs) {
-    cancelledJobIds().add(String(job._id));
+    abortChatJobWork(String(job._id));
     const g = globalThis as unknown as { __nexusesChatJobLocks?: Set<string> };
     g.__nexusesChatJobLocks?.delete(String(job._id));
   }

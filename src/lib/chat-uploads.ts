@@ -1,7 +1,8 @@
-import { mkdir, readFile, writeFile, rm } from "fs/promises";
+import { mkdir, readFile, readdir, writeFile, rm } from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
-import { MAX_CHAT_FILE_BYTES } from "@/lib/attachments";
+import { extractUploadedFile, MAX_CHAT_FILE_BYTES } from "@/lib/attachments";
+import type { ExtractedFile } from "@/lib/attachments";
 
 export type StoredUploadMeta = {
   id: string;
@@ -28,6 +29,48 @@ function uploadDir(projectId: string, uploadId: string) {
 
 function defaultExpiresAt(from = new Date()) {
   return new Date(from.getTime() + UPLOAD_TTL_MS).toISOString();
+}
+
+async function writeExtractSidecar(dir: string, file: File) {
+  try {
+    const extracted = await extractUploadedFile(file);
+    await writeFile(
+      path.join(dir, "extract.v1.json"),
+      JSON.stringify({
+        text: extracted.text,
+        fullText: extracted.fullText,
+      }),
+    );
+  } catch {
+    // Sidecar is optional — chat can re-parse if missing.
+  }
+}
+
+/** Load upload + cached parse (avoids re-reading CSV on every chat turn). */
+export async function loadChatUploadExtracted(input: {
+  userId: string;
+  projectId: string;
+  uploadId: string;
+}): Promise<ExtractedFile> {
+  const { meta, file } = await loadChatUploadFile(input);
+  const sidecarPath = path.join(uploadDir(input.projectId, input.uploadId), "extract.v1.json");
+  try {
+    const raw = await readFile(sidecarPath, "utf8");
+    const sidecar = JSON.parse(raw) as { text?: string; fullText?: string };
+    if (typeof sidecar.text === "string") {
+      return {
+        meta: { ...meta, uploadId: meta.id },
+        text: sidecar.text,
+        fullText: sidecar.fullText,
+      };
+    }
+  } catch {
+    // fall through
+  }
+  const extracted = await extractUploadedFile(file);
+  extracted.meta = { ...extracted.meta, uploadId: meta.id };
+  void writeExtractSidecar(uploadDir(input.projectId, input.uploadId), file);
+  return extracted;
 }
 
 export async function beginChunkedUpload(input: {
@@ -147,6 +190,8 @@ export async function finishChunkedUpload(input: {
     expiresAt: meta.expiresAt || defaultExpiresAt(),
   };
   await writeFile(path.join(dir, "meta.json"), JSON.stringify(finalMeta));
+  const file = new File([assembled], finalMeta.name, { type: finalMeta.type });
+  await writeExtractSidecar(dir, file);
   return finalMeta;
 }
 
@@ -178,6 +223,8 @@ export async function saveChatUpload(input: {
   };
   await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta));
   await writeFile(path.join(dir, "file"), bytes);
+  const file = new File([bytes], meta.name, { type: meta.type });
+  await writeExtractSidecar(dir, file);
   return meta;
 }
 
@@ -230,6 +277,39 @@ export async function loadChatUploadFile(input: {
 }
 
 /** Reload spreadsheets previously uploaded in this chat (so follow-ups don't re-ask). */
+/** All non-expired uploads bound to a chat (newest first). Used when message attachments lack uploadId. */
+export async function listChatUploadsForChat(input: {
+  userId: string;
+  projectId: string;
+  chatId: string;
+  limit?: number;
+}): Promise<StoredUploadMeta[]> {
+  const root = path.join(rootDir(), input.projectId);
+  let dirs: string[];
+  try {
+    dirs = await readdir(root);
+  } catch {
+    return [];
+  }
+  const metas: StoredUploadMeta[] = [];
+  for (const dirName of dirs) {
+    try {
+      const raw = await readFile(path.join(root, dirName, "meta.json"), "utf8");
+      const meta = JSON.parse(raw) as StoredUploadMeta & { incomplete?: boolean };
+      if (meta.incomplete) continue;
+      if (meta.userId !== input.userId) continue;
+      if (meta.chatId !== input.chatId) continue;
+      if (meta.expiresAt && Date.parse(meta.expiresAt) < Date.now()) continue;
+      metas.push(meta);
+    } catch {
+      // skip missing / corrupt
+    }
+  }
+  metas.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
+  return metas.slice(0, limit);
+}
+
 export async function loadRecentChatUploads(input: {
   userId: string;
   projectId: string;

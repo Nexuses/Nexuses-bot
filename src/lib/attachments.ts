@@ -4,6 +4,7 @@ import { excelBufferToCsvText, isExcelFile } from "@/lib/excel";
 export const MAX_CHAT_FILES = 5;
 /** Raised so campaign report CSVs (multi‑MB) can upload. */
 export const MAX_CHAT_FILE_BYTES = 32 * 1024 * 1024;
+export { DIRECT_CHAT_FILE_BYTES } from "@/lib/chat-file-limits";
 export const MAX_EXTRACTED_CHARS = 40_000;
 /** Max chars kept in memory for tools (imports / dashboards). */
 export const MAX_CSV_FULL_CHARS = 25 * 1024 * 1024;
@@ -68,13 +69,40 @@ function isSpreadsheetLike(name: string, type: string) {
   return isExcelFile(name, type) || isCsvLike(name, type);
 }
 
+function countLines(text: string) {
+  if (!text) return 0;
+  let count = 1;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === "\n") count += 1;
+  }
+  return count;
+}
+
+function firstLines(text: string, maxLines: number) {
+  const out: string[] = [];
+  let start = 0;
+  while (out.length < maxLines && start < text.length) {
+    const nl = text.indexOf("\n", start);
+    if (nl < 0) {
+      const tail = text.slice(start);
+      if (tail.length) out.push(tail);
+      break;
+    }
+    out.push(text.slice(start, nl));
+    start = nl + 1;
+  }
+  return out;
+}
+
 /** Build a short LLM-facing summary so large CSVs do not blow the context window. */
 export function summarizeCsvForPrompt(raw: string, name: string, byteSize: number) {
   const cleaned = raw.replace(/\u0000/g, "");
-  const lines = cleaned.split(/\r?\n/).filter((line) => line.length > 0);
-  const header = lines.find((line) => /email/i.test(line)) || lines[0] || "(no header)";
-  const dataCount = Math.max(0, lines.length - 1);
-  const headSample = lines.slice(0, 20).join("\n");
+  const sampleLines = firstLines(cleaned, 25);
+  const header =
+    sampleLines.find((line) => /email/i.test(line)) || sampleLines[0] || "(no header)";
+  const totalLines = countLines(cleaned);
+  const dataCount = Math.max(0, totalLines - 1);
+  const headSample = sampleLines.slice(0, 20).join("\n");
   const sizeMb = (byteSize / (1024 * 1024)).toFixed(1);
   const kind = isExcelFile(name) ? "Excel spreadsheet" : "CSV";
 

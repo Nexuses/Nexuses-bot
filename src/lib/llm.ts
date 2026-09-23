@@ -159,7 +159,10 @@ export async function complete(
       messages,
       tools: tools.length ? tools : undefined,
       tool_choice: tools.length ? "auto" : undefined,
-      temperature: tools.length ? 0.2 : 0.6,
+      temperature: tools.length ? 0.2 : 0.5,
+      max_tokens: tools.length
+        ? Number(process.env.LLM_MAX_TOKENS_TOOLS || 8192)
+        : Number(process.env.LLM_MAX_TOKENS_REPLY || 2048),
     }),
   });
 
