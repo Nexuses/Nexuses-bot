@@ -1,3 +1,4 @@
+import { stageToWrite } from "@/lib/attio-list-stage";
 import { attioNameValues } from "@/lib/attio-person-fields";
 import { exportBrevoCampaignRecipientsFull } from "@/lib/brevo-recipients";
 
@@ -200,16 +201,32 @@ async function upsertPersonWithStage(
     (created as { data?: { id?: { record_id?: string } } })?.data?.id?.record_id || "";
   if (!recordId) throw new Error(`Could not upsert ${person.email}`);
 
+  const stageToApply = await stageToWrite({
+    listId,
+    recordId,
+    stageSlug,
+    nextStage: stage,
+    request: (url, init) =>
+      requestJson(url, {
+        ...init,
+        headers: {
+          ...attioHeaders(apiKey),
+          ...(init.headers || {}),
+        },
+      }),
+  });
+  if (!stageToApply) return;
+
   const payloads = [
     {
       parent_record_id: recordId,
       parent_object: "people",
-      entry_values: { [stageSlug]: stage },
+      entry_values: { [stageSlug]: stageToApply },
     },
     {
       parent_record_id: recordId,
       parent_object: "people",
-      entry_values: { [stageSlug]: [{ status: stage }] },
+      entry_values: { [stageSlug]: [{ status: stageToApply }] },
     },
   ];
   let lastError = "";

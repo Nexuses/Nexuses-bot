@@ -1,4 +1,5 @@
 import { buildCampaignNotes, ensureCampaignNotes } from "@/lib/attio-campaign-notes";
+import { stageToWrite } from "@/lib/attio-list-stage";
 import { attioNameValues } from "@/lib/attio-person-fields";
 import { dbConnect } from "@/lib/db";
 import { BREVO_MCP_DEFAULT } from "@/lib/integration-constants";
@@ -456,7 +457,29 @@ async function upsertAttioPerson(
     (created as { data?: { id?: { record_id?: string } } })?.data?.id?.record_id || "";
   if (!recordId) throw new Error(`Could not upsert ${person.email}`);
 
-  const stage = String(person.stage || "").trim();
+  const requestedStage = String(person.stage || "").trim();
+  const stage = requestedStage
+    ? await stageToWrite({
+        listId,
+        recordId,
+        stageSlug,
+        nextStage: requestedStage,
+        request: (url, init) =>
+          requestJson(
+            url,
+            {
+              ...init,
+              headers: {
+                ...attioHeaders(apiKey),
+                ...(init.headers || {}),
+              },
+            },
+            6,
+            abortSignal,
+          ),
+      })
+    : "";
+  // null = already on a higher stage (e.g. Click). Keep it and still add campaign notes.
   if (stage) {
     const payloads = [
       {
@@ -936,7 +959,7 @@ async function syncUnifiedPortalSource(job: {
   return {
     completed,
     campaignStatus: campaign.status || "running",
-    summary: `Unified Portal · ${campaign.name}: synced **${updated}** → **${list.name}** (notes: Sent / Opened / Clicked, no duplicates${job.realEngagement ? "; real opens/clicks ≥45s after send" : ""})${failed ? `; ${failed} failed` : ""}${firstError ? `. ${firstError}` : ""}`,
+    summary: `Unified Portal · ${campaign.name}: synced **${updated}** → **${list.name}** (notes: Sent / Opened / Clicked, no duplicates; existing stage is never lowered${job.realEngagement ? "; real opens/clicks ≥45s after send" : ""})${failed ? `; ${failed} failed` : ""}${firstError ? `. ${firstError}` : ""}`,
   };
 }
 

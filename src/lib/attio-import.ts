@@ -1,4 +1,5 @@
 import { buildCampaignNotes, ensureCampaignNotes } from "@/lib/attio-campaign-notes";
+import { stageToWrite } from "@/lib/attio-list-stage";
 import { attioNameValues, looksLikeEmail, splitPersonName } from "@/lib/attio-person-fields";
 import { campaignNameFromFile } from "@/lib/outreach-report";
 
@@ -926,39 +927,56 @@ export async function runAttioCsvImportFromText(input: {
       );
       const recordId = pickAttioId(person, ["record_id"]);
       if (!recordId) throw new Error("Person was not created");
-      const payloads = [
-        {
-          parent_record_id: recordId,
-          parent_object: "people",
-          entry_values: rowStage ? { [stageSlug]: rowStage } : {},
-        },
-        {
-          parent_record_id: recordId,
-          parent_object: "people",
-          entry_values: rowStage ? { [stageSlug]: [{ status: rowStage }] } : {},
-        },
-      ];
-      let listed = false;
-      let lastError = "";
-      for (const data of payloads) {
-        try {
-          await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
-            method: "PUT",
-            headers: attioHeaders(input.apiKey),
-            body: JSON.stringify({ data }),
-          });
-          listed = true;
-          break;
-        } catch (err) {
-          lastError = err instanceof Error ? err.message : "failed";
+      const stageToApply = rowStage
+        ? await stageToWrite({
+            listId,
+            recordId,
+            stageSlug,
+            nextStage: rowStage,
+            request: (url, init) =>
+              requestJson(url, {
+                ...init,
+                headers: {
+                  ...attioHeaders(input.apiKey),
+                  ...(init.headers || {}),
+                },
+              }),
+          })
+        : "";
+      if (stageToApply) {
+        const payloads = [
+          {
+            parent_record_id: recordId,
+            parent_object: "people",
+            entry_values: { [stageSlug]: stageToApply },
+          },
+          {
+            parent_record_id: recordId,
+            parent_object: "people",
+            entry_values: { [stageSlug]: [{ status: stageToApply }] },
+          },
+        ];
+        let listed = false;
+        let lastError = "";
+        for (const data of payloads) {
+          try {
+            await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
+              method: "PUT",
+              headers: attioHeaders(input.apiKey),
+              body: JSON.stringify({ data }),
+            });
+            listed = true;
+            break;
+          } catch (err) {
+            lastError = err instanceof Error ? err.message : "failed";
+          }
         }
-      }
-      if (!listed) {
-        if (rowStage) {
+        if (!listed) {
           throw new Error(
-            `Could not set stage "${rowStage}" for ${email}: ${lastError || "Attio rejected stage write"}`,
+            `Could not set stage "${stageToApply}" for ${email}: ${lastError || "Attio rejected stage write"}`,
           );
         }
+      } else if (!rowStage) {
         await requestJson(`${ATTIO}/v2/lists/${encodeURIComponent(listId)}/entries`, {
           method: "POST",
           headers: attioHeaders(input.apiKey),
